@@ -99,3 +99,128 @@ discord.app_commands.errors.CommandInvokeError: Command 'ask' raised an exceptio
 2026-03-17 22:58:26,626 [INFO] AFC is enabled with max remote calls: 10.
 2026-03-17 22:58:26,997 [INFO] HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent "HTTP/1.1 429 Too Many Requests"
 2026-03-17 22:58:27,000 [ERROR] Lỗi Gemini AI: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.0-flash\nPlease retry in 33.068974855s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.0-flash'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.0-flash'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.0-flash'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '33s'}]}}
+2026-03-17 23:03:30,088 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:03:30,189 [INFO] logging in using static token
+2026-03-17 23:03:32,109 [INFO] Shard ID None has connected to Gateway (Session ID: a4c4ee9c37d4c57c009d58508cd56769).
+2026-03-17 23:03:34,116 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:03:34,116 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:03:34,648 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:03:34,650 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:03:34,651 [INFO] aint.trwdat bắt đầu học lúc 23:03:34
+2026-03-17 23:04:22,051 [INFO] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-03-17 23:04:22,052 [ERROR] Lỗi Claude AI: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CZ8wG3ZpYcocg8pCPXmfh'}
+2026-03-17 23:10:26,923 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:10:27,049 [INFO] logging in using static token
+2026-03-17 23:10:28,796 [INFO] Shard ID None has connected to Gateway (Session ID: f278c150bf9bb13576c6c17747548ad6).
+2026-03-17 23:10:30,807 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:10:30,807 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:10:31,209 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:10:31,210 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:10:31,210 [INFO] aint.trwdat bắt đầu học lúc 23:10:31
+2026-03-17 23:10:58,315 [ERROR] Ignoring exception in command 'ask'
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+  File "/home/truongdat/Desktop/discord_bot/bot.py", line 618, in slash_ask
+    async def slash_ask(interaction: discord.Interaction, question: str):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/interactions.py", line 892, in defer
+    response = await adapter.create_interaction_response(
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/webhook/async_.py", line 224, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/tree.py", line 1302, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'ask' raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+2026-03-17 23:10:58,679 [INFO] AFC is enabled with max remote calls: 10.
+2026-03-17 23:10:58,974 [INFO] HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent "HTTP/1.1 404 Not Found"
+2026-03-17 23:10:58,977 [ERROR] Lỗi Gemini AI: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}
+2026-03-17 23:13:05,981 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:13:06,124 [INFO] logging in using static token
+2026-03-17 23:13:07,667 [INFO] Shard ID None has connected to Gateway (Session ID: ad8174254801d8428e54074df7ad4e7b).
+2026-03-17 23:13:09,675 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:13:09,675 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:13:10,046 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:13:10,047 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:13:10,047 [INFO] aint.trwdat bắt đầu học lúc 23:13:10
+2026-03-17 23:13:28,029 [INFO] AFC is enabled with max remote calls: 10.
+2026-03-17 23:13:28,336 [INFO] HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:13:28,338 [ERROR] Lỗi Gemini AI: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash-lite\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash-lite\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.0-flash-lite\nPlease retry in 31.725377339s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.0-flash-lite', 'location': 'global'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.0-flash-lite', 'location': 'global'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'model': 'gemini-2.0-flash-lite', 'location': 'global'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '31s'}]}}
+2026-03-17 23:17:01,689 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:17:01,822 [INFO] logging in using static token
+2026-03-17 23:17:04,721 [INFO] Shard ID None has connected to Gateway (Session ID: 779d83aae8c69ff329c85a6a517d6cc6).
+2026-03-17 23:17:06,725 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:17:06,726 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:17:07,126 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:17:07,127 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:17:07,127 [INFO] aint.trwdat bắt đầu học lúc 23:17:07
+2026-03-17 23:17:33,537 [INFO] AFC is enabled with max remote calls: 10.
+2026-03-17 23:17:33,772 [INFO] HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:17:33,773 [ERROR] Lỗi Gemini AI: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash-lite\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.0-flash-lite\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.0-flash-lite\nPlease retry in 26.295053945s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.0-flash-lite'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.0-flash-lite', 'location': 'global'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.0-flash-lite'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '26s'}]}}
+2026-03-17 23:22:03,772 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:22:03,826 [INFO] logging in using static token
+2026-03-17 23:22:05,368 [INFO] Shard ID None has connected to Gateway (Session ID: 0b084fb707790d4549431b440384e03a).
+2026-03-17 23:22:07,372 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:22:07,372 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:22:07,854 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:22:07,854 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:22:07,855 [INFO] aint.trwdat bắt đầu học lúc 23:22:07
+2026-03-17 23:22:28,040 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"
+2026-03-17 23:22:28,042 [ERROR] Lỗi OpenRouter AI: Error code: 404 - {'error': {'message': 'No endpoints found for meta-llama/llama-3.1-8b-instruct:free.', 'code': 404}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:24:54,672 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:24:54,726 [INFO] logging in using static token
+2026-03-17 23:24:56,143 [INFO] Shard ID None has connected to Gateway (Session ID: 0108067c8acd78a2db389cb0b579aafb).
+2026-03-17 23:24:58,147 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:24:58,147 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:24:59,904 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:24:59,905 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:24:59,905 [INFO] aint.trwdat bắt đầu học lúc 23:24:59
+2026-03-17 23:25:12,559 [ERROR] Ignoring exception in command 'ask'
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+  File "/home/truongdat/Desktop/discord_bot/bot.py", line 625, in slash_ask
+    await interaction.response.defer(thinking=True)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/interactions.py", line 892, in defer
+    response = await adapter.create_interaction_response(
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/webhook/async_.py", line 224, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/tree.py", line 1302, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'ask' raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+2026-03-17 23:25:13,811 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:25:13,812 [INFO] Retrying request to /chat/completions in 0.498020 seconds
+2026-03-17 23:25:15,185 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:25:15,186 [INFO] Retrying request to /chat/completions in 0.913571 seconds
+2026-03-17 23:25:17,010 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:25:17,013 [ERROR] Lỗi OpenRouter AI: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'meta-llama/llama-3.3-70b-instruct:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Venice', 'is_byok': False}}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:26:36,566 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:26:36,619 [INFO] logging in using static token
+2026-03-17 23:26:38,381 [INFO] Shard ID None has connected to Gateway (Session ID: c899c52e3a4d61b926379b1035a887b3).
+2026-03-17 23:26:40,392 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:26:40,392 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:26:40,807 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:26:40,808 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:26:40,808 [INFO] aint.trwdat bắt đầu học lúc 23:26:40
+2026-03-17 23:26:48,711 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:26:48,712 [INFO] Retrying request to /chat/completions in 0.409027 seconds
+2026-03-17 23:26:50,070 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:26:50,071 [INFO] Retrying request to /chat/completions in 0.864526 seconds
+2026-03-17 23:26:51,615 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:26:51,617 [ERROR] Lỗi OpenRouter AI: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'meta-llama/llama-3.3-70b-instruct:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Venice', 'is_byok': False}}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}

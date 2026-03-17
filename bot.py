@@ -12,14 +12,14 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string
 
 try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
+    from openai import OpenAI
+    OPENROUTER_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    OPENROUTER_AVAILABLE = False
 
 load_dotenv()
-TOKEN             = os.getenv('DISCORD_TOKEN')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+TOKEN              = os.getenv('DISCORD_TOKEN')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 SERVERS = [
     {
@@ -81,8 +81,11 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 ai_client = None
-if ANTHROPIC_AVAILABLE and ANTHROPIC_API_KEY:
-    ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+if OPENROUTER_AVAILABLE and OPENROUTER_API_KEY:
+    ai_client = OpenAI(
+        base_url='https://openrouter.ai/api/v1',
+        api_key=OPENROUTER_API_KEY
+    )
 
 pending_checks: dict[int, asyncio.Task] = {}
 join_times: dict[int, datetime]         = {}
@@ -508,23 +511,27 @@ async def _check_absences():
 
 async def _ask_ai(question: str) -> str:
     if not ai_client:
-        return '❌ Chức năng AI chưa được cấu hình (thiếu `ANTHROPIC_API_KEY` trong .env).'
+        return '❌ Chức năng AI chưa được cấu hình (thiếu `OPENROUTER_API_KEY` trong .env).'
     try:
         response = await asyncio.to_thread(
-            ai_client.messages.create,
-            model='claude-haiku-4-5-20251001',
-            max_tokens=1000,
-            system=(
-                'Bạn là trợ lý học tập thông minh trong một Discord server học tập. '
-                'Trả lời ngắn gọn, dễ hiểu bằng tiếng Việt. '
-                'Dùng emoji phù hợp. Tối đa 400 từ.'
-            ),
-            messages=[{'role': 'user', 'content': question}]
+            ai_client.chat.completions.create,
+            model='meta-llama/llama-3.3-70b-instruct:free',
+            messages=[
+                {
+                    'role': 'system',
+                    'content': (
+                        'Bạn là trợ lý học tập thông minh trong một Discord server học tập. '
+                        'Trả lời ngắn gọn, dễ hiểu bằng tiếng Việt. '
+                        'Dùng emoji phù hợp. Tối đa 400 từ.'
+                    )
+                },
+                {'role': 'user', 'content': question}
+            ]
         )
-        msg = f'🤖 **Câu hỏi:** {question}\n\n📝 **Trả lời:**\n{response.content[0].text}'
+        msg = f'🤖 **Câu hỏi:** {question}\n\n📝 **Trả lời:**\n{response.choices[0].message.content}'
         return msg[:1990] + '...' if len(msg) > 2000 else msg
     except Exception as e:
-        log.error(f'Lỗi Claude AI: {e}')
+        log.error(f'Lỗi OpenRouter AI: {e}')
         return '❌ Có lỗi xảy ra khi gọi AI. Thử lại sau nhé!'
 
 
