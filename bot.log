@@ -224,3 +224,49 @@ discord.app_commands.errors.CommandInvokeError: Command 'ask' raised an exceptio
 2026-03-17 23:26:50,071 [INFO] Retrying request to /chat/completions in 0.864526 seconds
 2026-03-17 23:26:51,615 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
 2026-03-17 23:26:51,617 [ERROR] Lỗi OpenRouter AI: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'meta-llama/llama-3.3-70b-instruct:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Venice', 'is_byok': False}}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:28:43,921 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:28:43,978 [INFO] logging in using static token
+2026-03-17 23:28:45,817 [INFO] Shard ID None has connected to Gateway (Session ID: bb3a8b59285f2707d32e315d6d67817e).
+2026-03-17 23:28:47,822 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:28:47,822 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:28:48,215 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:28:48,215 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:28:48,216 [INFO] aint.trwdat bắt đầu học lúc 23:28:48
+2026-03-17 23:29:07,893 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"
+2026-03-17 23:29:07,895 [ERROR] Lỗi OpenRouter AI: Error code: 404 - {'error': {'message': 'No endpoints found for deepseek/deepseek-r1:free.', 'code': 404}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:25,734 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:31:25,792 [INFO] logging in using static token
+2026-03-17 23:31:27,325 [INFO] Shard ID None has connected to Gateway (Session ID: bbfe3a256db905be541d744fc322100b).
+2026-03-17 23:31:29,331 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:31:29,332 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:31:29,741 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:31:29,741 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:31:29,742 [INFO] aint.trwdat bắt đầu học lúc 23:31:29
+2026-03-17 23:31:44,263 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"
+2026-03-17 23:31:44,265 [WARNING] Model deepseek/deepseek-r1:free lỗi, thử model khác: Error code: 404 - {'error': {'message': 'No endpoints found for deepseek/deepseek-r1:free.', 'code': 404}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:45,269 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:45,270 [INFO] Retrying request to /chat/completions in 0.464241 seconds
+2026-03-17 23:31:46,631 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:46,634 [INFO] Retrying request to /chat/completions in 0.805583 seconds
+2026-03-17 23:31:48,398 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:48,399 [WARNING] Model meta-llama/llama-3.3-70b-instruct:free lỗi, thử model khác: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'meta-llama/llama-3.3-70b-instruct:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Venice', 'is_byok': False}}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:49,064 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:49,066 [INFO] Retrying request to /chat/completions in 0.486196 seconds
+2026-03-17 23:31:50,225 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:50,226 [INFO] Retrying request to /chat/completions in 0.984885 seconds
+2026-03-17 23:31:51,630 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-03-17 23:31:51,630 [WARNING] Model google/gemma-3-27b-it:free lỗi, thử model khác: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'google/gemma-3-27b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Google AI Studio', 'is_byok': False}}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:51,970 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"
+2026-03-17 23:31:51,972 [WARNING] Model mistralai/mistral-7b-instruct:free lỗi, thử model khác: Error code: 404 - {'error': {'message': 'No endpoints found for mistralai/mistral-7b-instruct:free.', 'code': 404}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:52,354 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 404 Not Found"
+2026-03-17 23:31:52,356 [WARNING] Model qwen/qwen-2.5-72b-instruct:free lỗi, thử model khác: Error code: 404 - {'error': {'message': 'No endpoints found for qwen/qwen-2.5-72b-instruct:free.', 'code': 404}, 'user_id': 'user_3B51viWomcX1jEG03Y4yCEeJuvM'}
+2026-03-17 23:31:52,358 [ERROR] Tất cả model đều lỗi
+2026-03-17 23:33:58,595 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 23:33:58,650 [INFO] logging in using static token
+2026-03-17 23:34:00,691 [INFO] Shard ID None has connected to Gateway (Session ID: d470ca1c5c75181a082f3adb657699e3).
+2026-03-17 23:34:02,696 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 23:34:02,696 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 23:34:03,066 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 23:34:03,067 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 23:34:03,067 [INFO] aint.trwdat bắt đầu học lúc 23:34:03
+2026-03-17 23:34:20,050 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"

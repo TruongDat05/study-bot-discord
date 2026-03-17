@@ -515,7 +515,7 @@ async def _ask_ai(question: str) -> str:
     try:
         response = await asyncio.to_thread(
             ai_client.chat.completions.create,
-            model='deepseek/deepseek-r1:free',
+            model='openrouter/auto',
             messages=[
                 {
                     'role': 'system',
