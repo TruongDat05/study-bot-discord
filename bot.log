@@ -37,3 +37,13 @@
 2026-03-17 09:14:52,124 [INFO] logging in using static token
 2026-03-17 09:14:53,956 [INFO] Shard ID None has connected to Gateway (Session ID: e9a50c23789741d6c75666487a5f5e15).
 2026-03-17 09:14:55,970 [INFO] Bot con bot gay đã sẵn sàng!
+2026-03-17 22:40:20,811 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 22:40:20,815 [INFO] logging in using static token
+2026-03-17 22:43:17,085 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-17 22:43:17,089 [INFO] logging in using static token
+2026-03-17 22:43:18,700 [INFO] Shard ID None has connected to Gateway (Session ID: 173c163cb7d86ed88fe775d579c8adc3).
+2026-03-17 22:43:20,708 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-17 22:43:20,708 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-17 22:43:21,131 [INFO] ✅ Đã sync 5 slash commands
+2026-03-17 22:43:21,132 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-17 22:43:21,132 [INFO] aint.trwdat bắt đầu học lúc 22:43:21

@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
@@ -80,17 +81,9 @@ intents.members         = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-ai_model = None
+ai_client = None
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    ai_model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        system_instruction=(
-            'Bạn là trợ lý học tập thông minh trong một Discord server học tập. '
-            'Trả lời ngắn gọn, dễ hiểu bằng tiếng Việt. '
-            'Dùng emoji phù hợp. Tối đa 400 từ.'
-        )
-    )
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 pending_checks: dict[int, asyncio.Task] = {}
 join_times: dict[int, datetime]         = {}
@@ -515,11 +508,21 @@ async def _check_absences():
 
 
 async def _ask_ai(question: str) -> str:
-    if not ai_model:
+    if not ai_client:
         return '❌ Chức năng AI chưa được cấu hình (thiếu `GEMINI_API_KEY` trong .env).'
     try:
-        response = await asyncio.to_thread(ai_model.generate_content, question)
-        msg      = f'🤖 **Câu hỏi:** {question}\n\n📝 **Trả lời:**\n{response.text}'
+        system = (
+            'Bạn là trợ lý học tập thông minh trong một Discord server học tập. '
+            'Trả lời ngắn gọn, dễ hiểu bằng tiếng Việt. '
+            'Dùng emoji phù hợp. Tối đa 400 từ.'
+        )
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model='gemini-2.0-flash',
+            contents=question,
+            config=types.GenerateContentConfig(system_instruction=system)
+        )
+        msg = f'🤖 **Câu hỏi:** {question}\n\n📝 **Trả lời:**\n{response.text}'
         return msg[:1990] + '...' if len(msg) > 2000 else msg
     except Exception as e:
         log.error(f'Lỗi Gemini AI: {e}')
