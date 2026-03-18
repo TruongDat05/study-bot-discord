@@ -270,3 +270,89 @@ discord.app_commands.errors.CommandInvokeError: Command 'ask' raised an exceptio
 2026-03-17 23:34:03,067 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
 2026-03-17 23:34:03,067 [INFO] aint.trwdat bắt đầu học lúc 23:34:03
 2026-03-17 23:34:20,050 [INFO] HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-18 16:40:01,173 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-18 16:40:01,222 [INFO] logging in using static token
+2026-03-18 16:40:02,856 [INFO] Shard ID None has connected to Gateway (Session ID: 15bd772d32e2857bd67d792ffbd93079).
+2026-03-18 16:40:04,860 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-18 16:40:04,860 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-18 16:40:05,299 [INFO] ✅ Đã sync 10 slash commands
+2026-03-18 16:40:05,299 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-18 16:40:05,300 [INFO] [16:40] Chạy checkpoint định kỳ...
+2026-03-18 16:40:05,716 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:40:06,357 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:40:31,301 [INFO] aint.trwdat bắt đầu học lúc 16:40:31
+2026-03-18 16:40:32,353 [INFO] aint.trwdat vào phòng → đếm ngược 60s.
+2026-03-18 16:40:45,541 [INFO] aint.trwdat bắt đầu stream → huỷ đếm ngược kick.
+2026-03-18 16:40:52,690 [INFO] aint.trwdat rời phòng sau 21s.
+2026-03-18 16:41:20,457 [ERROR] Ignoring exception in command 'leaderboard'
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+  File "/home/truongdat/Desktop/discord_bot/bot.py", line 961, in slash_leaderboard
+    await interaction.response.send_message('\n'.join(lines))
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/interactions.py", line 1085, in send_message
+    data = await adapter.create_interaction_response(
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/webhook/async_.py", line 224, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/tree.py", line 1302, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+  File "/home/truongdat/.local/lib/python3.10/site-packages/discord/app_commands/commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+2026-03-18 16:44:06,413 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-18 16:44:06,461 [INFO] logging in using static token
+2026-03-18 16:44:07,935 [INFO] Shard ID None has connected to Gateway (Session ID: 04bac6bbd632bab0c7bdb295293a8df5).
+2026-03-18 16:44:09,983 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-18 16:44:09,983 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-18 16:44:10,400 [INFO] ✅ Đã sync 10 slash commands
+2026-03-18 16:44:10,401 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-18 16:44:10,405 [INFO] [16:44] Chạy checkpoint định kỳ...
+2026-03-18 16:44:10,777 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:44:11,173 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:49:48,021 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-18 16:49:48,069 [INFO] logging in using static token
+2026-03-18 16:49:49,542 [INFO] Shard ID None has connected to Gateway (Session ID: 33cd1f6bedfa01bd16e093409bd87790).
+2026-03-18 16:49:51,549 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-18 16:49:51,549 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-18 16:49:51,950 [INFO] ✅ Sync 10 lệnh → IELTS Master Hub
+2026-03-18 16:49:52,298 [INFO] ✅ Sync 10 lệnh → Khu Tự Trị
+2026-03-18 16:49:52,666 [INFO] ✅ Tổng cộng đã sync 20 slash commands
+2026-03-18 16:49:52,666 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-18 16:49:52,667 [INFO] [16:49] Chạy checkpoint định kỳ...
+2026-03-18 16:49:53,015 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:49:53,388 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:55:28,257 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-18 16:55:28,302 [INFO] logging in using static token
+2026-03-18 16:55:29,161 [ERROR] Lỗi load Pomodoro Cog: name 'create_pomodoro_cog' is not defined
+2026-03-18 16:55:29,162 [INFO] ⏳ Cog đã load, chờ on_ready để sync...
+2026-03-18 16:55:29,976 [INFO] Shard ID None has connected to Gateway (Session ID: 68e097b2c1817bab56191e3bdfd46459).
+2026-03-18 16:55:31,980 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-18 16:55:31,981 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-18 16:55:32,312 [INFO] ✅ Sync 10 lệnh → IELTS Master Hub
+2026-03-18 16:55:32,667 [INFO] ✅ Sync 10 lệnh → Khu Tự Trị
+2026-03-18 16:55:32,668 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-18 16:55:32,669 [INFO] [16:55] Chạy checkpoint định kỳ...
+2026-03-18 16:55:33,033 [INFO] Tạo live message mới tại kênh general
+2026-03-18 16:55:33,489 [INFO] Tạo live message mới tại kênh general
+2026-03-18 17:03:08,514 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-18 17:03:08,558 [INFO] logging in using static token
+2026-03-18 17:03:10,072 [INFO] Shard ID None has connected to Gateway (Session ID: 9371ed6f2fdea4a9e11354df8400a0f6).
+2026-03-18 17:03:12,079 [INFO] ✅ Bot con bot gay đã sẵn sàng!
+2026-03-18 17:03:12,079 [INFO] 📡 Đang theo dõi 3 phòng voice.
+2026-03-18 17:03:12,080 [INFO] ✅ Pomodoro Cog đã được tải
+2026-03-18 17:03:12,481 [INFO] ✅ Sync 11 lệnh → IELTS Master Hub
+2026-03-18 17:03:12,817 [INFO] ✅ Sync 11 lệnh → Khu Tự Trị
+2026-03-18 17:03:12,818 [INFO] 🌐 Dashboard chạy tại http://localhost:5000
+2026-03-18 17:03:12,819 [INFO] [17:03] Chạy checkpoint định kỳ...
+2026-03-18 17:03:13,170 [INFO] Tạo live message mới tại kênh general
+2026-03-18 17:03:13,653 [INFO] Tạo live message mới tại kênh general
+2026-03-18 17:03:53,140 [INFO] aint.trwdat bắt đầu học lúc 17:03:53
+2026-03-18 17:03:54,116 [INFO] aint.trwdat vào phòng → đếm ngược 60s.
+2026-03-18 17:04:55,033 [INFO] aint.trwdat rời phòng sau 0s.
