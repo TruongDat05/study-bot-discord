@@ -404,6 +404,28 @@ def format_time(seconds: int) -> str:
     if m > 0:   return f'{m}m {s}s'
     return f'{s}s'
 
+def _get_live_enriched_data() -> dict:
+    """
+    Trả về data từ disk, bổ sung thêm placeholder cho user đang live
+    nhưng chưa có trong file (chưa qua checkpoint lần nào).
+    Đảm bảo /leaderboard và /studying luôn thấy user ngay từ giây đầu.
+    """
+    data = load_data()
+    for mid in list(join_times.keys()):
+        uid = str(mid)
+        if uid in data:
+            continue
+        # Tìm tên member từ guilds
+        name = f'User {mid}'
+        for guild in bot.guilds:
+            m = guild.get_member(mid)
+            if m:
+                name = m.display_name
+                break
+        # Tạo placeholder in-memory (KHÔNG ghi vào disk)
+        data[uid] = _default_user(name)
+    return data
+
 def get_report_channel_for(member: discord.Member):
     guild_id = member.guild.id
     for server in SERVERS:
@@ -868,7 +890,7 @@ async def update_live_message(server: dict):
     guild     = channel.guild
     voice_ids = server['voice_channels']
     today     = now.strftime('%Y-%m-%d')
-    data      = load_data()          # ← load 1 lần ngoài loop, không đọc disk N lần
+    data      = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     active    = []
     for mid, start_time in list(join_times.items()):
         m = guild.get_member(mid)
@@ -1261,7 +1283,7 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
 async def slash_rank(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     await interaction.response.send_message(
-        _build_rank_message(target, load_data()),
+        _build_rank_message(target, _get_live_enriched_data()),  # ← thấy user ngay khi vào phòng
         ephemeral=(member is None)
     )
 
@@ -1271,7 +1293,7 @@ async def slash_rank(interaction: discord.Interaction, member: discord.Member = 
 async def slash_quest(interaction: discord.Interaction):
     uid   = str(interaction.user.id)
     today = datetime.now().strftime('%Y-%m-%d')
-    data  = load_data()
+    data  = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
     if uid not in data:
         await interaction.response.send_message(
             '❌ Bạn chưa có dữ liệu! Hãy vào phòng học trước.', ephemeral=True
@@ -1320,7 +1342,7 @@ async def slash_quest(interaction: discord.Interaction):
 async def slash_badges(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     uid    = str(target.id)
-    data   = load_data()
+    data   = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
     if uid not in data:
         await interaction.response.send_message(
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
@@ -1371,7 +1393,7 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
 @app_commands.describe(member='Thành viên (để trống = bản thân)')
 async def slash_stats(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
-    data   = load_data()
+    data   = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
     uid    = str(target.id)
     if uid not in data:
         await interaction.response.send_message(
@@ -1414,7 +1436,7 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
 
 @bot.tree.command(name='leaderboard', description='Bảng xếp hạng hôm nay')
 async def slash_leaderboard(interaction: discord.Interaction):
-    data  = load_data()
+    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     today = datetime.now().strftime('%Y-%m-%d')
     now   = datetime.now()
     def real_time(uid_str, info):
@@ -1471,7 +1493,7 @@ async def slash_top_alltime(interaction: discord.Interaction):
 async def slash_studying(interaction: discord.Interaction):
     now   = datetime.now()
     guild = interaction.guild
-    data  = load_data()  # load 1 lần, không load lại trong loop
+    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     today = now.strftime('%Y-%m-%d')
     lines = ['🟢 **Đang học ngay lúc này**\n']
     count = 0
@@ -1522,20 +1544,18 @@ async def slash_setgoal(
 @bot.tree.command(name='remind', description='Đặt giờ nhắc học hàng ngày qua DM')
 @app_commands.describe(hour='Giờ nhắc (0-23), nhập -1 để tắt')
 async def slash_remind(interaction: discord.Interaction, hour: int):
-    uid = str(interaction.user.id)
+    uid  = str(interaction.user.id)
     data = load_data()
-    if uid not in data:
-        data[uid] = _default_user(interaction.user.display_name)
 
     if hour == -1 or hour < 0:
-        # Tắt nhắc
-        data[uid]['remind_hour'] = None
-        save_data(data)
-        # Hủy task nếu có
+        # Tắt nhắc — chỉ xử lý nếu user đã có data hoặc có task đang chạy
         old = remind_tasks.pop(interaction.user.id, None)
         if old:
             task = old[1]
             if task and not task.done(): task.cancel()
+        if uid in data:
+            data[uid]['remind_hour'] = None
+            save_data(data)
         await interaction.response.send_message(
             '🔕 Đã tắt nhắc học.\n_Dùng `/remind <giờ>` để bật lại._', ephemeral=True
         )
@@ -1544,6 +1564,8 @@ async def slash_remind(interaction: discord.Interaction, hour: int):
     if not (0 <= hour <= 23):
         await interaction.response.send_message('❌ Giờ phải từ 0 đến 23!', ephemeral=True); return
 
+    if uid not in data:
+        data[uid] = _default_user(interaction.user.display_name)
     data[uid]['remind_hour'] = hour
     save_data(data)
 
@@ -1638,7 +1660,11 @@ async def slash_syncroles(interaction: discord.Interaction):
     guild   = interaction.guild
     updated = 0
     for uid, info in data.items():
-        m = guild.get_member(int(uid))
+        try:
+            member_id = int(uid)
+        except ValueError:
+            continue   # bỏ qua key không hợp lệ
+        m = guild.get_member(member_id)
         if not m: continue
         await assign_level_role(m, info.get('level', 0), -1)
         updated += 1
@@ -1715,7 +1741,7 @@ async def cmd_stats(ctx, member: discord.Member = None):
 
 @bot.command(name='leaderboard', aliases=['lb', 'top'])
 async def cmd_leaderboard(ctx):
-    data  = load_data()
+    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     today = datetime.now().strftime('%Y-%m-%d')
     now   = datetime.now()
     def real_time(uid_str, info):
@@ -2107,7 +2133,7 @@ def _update_live_cache():
     global _live_state_cache
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
-    data  = load_data()
+    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     result = []
     for mid, start in join_times.items():
         uid      = str(mid)
