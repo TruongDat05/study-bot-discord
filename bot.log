@@ -368,3 +368,21 @@ discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an 
 2026-03-18 18:36:06,157 [INFO] [18:36] Chạy checkpoint định kỳ...
 2026-03-18 18:36:06,551 [INFO] Tạo live message mới tại kênh noti-study
 2026-03-18 18:36:07,113 [INFO] Tạo live message mới tại kênh general
+2026-03-21 17:36:51,689 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-21 17:36:51,740 [INFO] logging in using static token
+2026-03-21 17:36:53,539 [INFO] Shard ID None has connected to Gateway (Session ID: bb31b6148f88e067f23892f8f60e0e84).
+2026-03-21 17:36:55,547 [INFO] ✅ Bot con bot gay ready!
+2026-03-21 17:36:55,548 [INFO] ✅ Pomodoro Cog loaded
+2026-03-21 17:36:56,810 [INFO] Sync 19 cmds → IELTS Master Hub
+2026-03-21 17:36:57,191 [INFO] Sync 19 cmds → Khu Tự Trị
+2026-03-21 17:36:57,192 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-21 17:36:57,192 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-21 17:36:57,192 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-21 17:36:57,195 [INFO] aint.trwdat bắt đầu học lúc 17:36:57
+2026-03-21 17:36:57,195 [INFO] [17:36] Checkpoint...
+2026-03-21 17:37:45,699 [INFO] aint.trwdat rời phòng sau 47s
+2026-03-21 17:37:58,907 [INFO] aint.trwdat bắt đầu học lúc 17:37:58
+2026-03-21 17:37:59,427 [INFO] aint.trwdat vào phòng không có Cam/Stream → 60s countdown.
+2026-03-21 17:38:31,802 [INFO] [Backup] Saved → backups/study_data_20260321_173831.json
+2026-03-21 17:39:00,762 [INFO] aint.trwdat rời phòng sau 0s
+2026-03-21 17:41:57,202 [INFO] [17:41] Checkpoint...

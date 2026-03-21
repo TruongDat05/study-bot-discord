@@ -3,10 +3,10 @@
     "name": "aint.trwdat",
     "daily": {
       "2026-03-18": 82,
-      "2026-03-21": 108
+      "2026-03-21": 47
     },
-    "total": 190,
-    "xp": 20,
+    "total": 129,
+    "xp": 10,
     "level": 0,
     "streak": 1,
     "longest_streak": 1,
@@ -18,7 +18,7 @@
       "2026-03-21": [
         {
           "id": "study_60",
-          "progress": 1,
+          "progress": 0,
           "done": false
         },
         {
@@ -28,7 +28,7 @@
         },
         {
           "id": "study_30",
-          "progress": 1,
+          "progress": 0,
           "done": false
         }
       ]
