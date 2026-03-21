@@ -766,13 +766,15 @@ class PomodoroCog(commands.Cog):
                         f'👥 Cùng nhau với `{grp.member_count}` người! 💪'
                     )
 
+                # Khởi edit_task countdown (chỉ khi có announce_msg)
+                edit_task = None
                 if grp.announce_msg:
                     edit_task = asyncio.create_task(
                         self._group_countdown_loop(grp)
                     )
 
                 await asyncio.sleep(grp.work_minutes * 60)
-                if grp.announce_msg:
+                if edit_task and not edit_task.done():
                     edit_task.cancel()
 
                 # Lưu thời gian học và cộng XP cho từng thành viên
