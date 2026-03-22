@@ -253,9 +253,15 @@ def create_weekly_report_cog(
             uid  = str(interaction.user.id)
             data = load_data_fn()
             if uid not in data:
-                await interaction.followup.send(
-                    '❌ Bạn chưa có dữ liệu! Hãy vào phòng học trước.', ephemeral=True
-                ); return
+                data[uid] = {
+                    'name': interaction.user.display_name,
+                    'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                    'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                    'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                    'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                    'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+                }
+                save_data_fn(data)
             msg = _build_weekly_dm(
                 data[uid].get('name', interaction.user.display_name),
                 data[uid], _week_dates(0), _week_dates(-1), all_badges,
@@ -335,6 +341,7 @@ def create_weekly_report_cog(
 
         @weekly_group.command(name='leaderboard', description='Top người học nhiều nhất tuần này')
         async def weekly_leaderboard(self, interaction: discord.Interaction):
+            await interaction.response.defer()
             data      = load_data_fn()
             this_week = _week_dates(0)
             # Pre-compute để tránh gọi _week_total 2 lần / user
@@ -363,16 +370,15 @@ def create_weekly_report_cog(
                         f'       ⏱️ Tuần này: `{_format_time(secs)}`'
                     )
 
-            await interaction.response.send_message('\n'.join(lines))
-
-        # ── /weekly compare ───────────────────────────────────────────────
+            await interaction.followup.send('\n'.join(lines))
 
         @weekly_group.command(name='compare', description='So sánh tuần này vs tuần trước của bạn')
         async def weekly_compare(self, interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
             uid  = str(interaction.user.id)
             data = load_data_fn()
             if uid not in data:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     '❌ Chưa có dữ liệu!', ephemeral=True
                 ); return
             info      = data[uid]
@@ -409,11 +415,9 @@ def create_weekly_report_cog(
                 f'Tuần trước: `{_format_time(last_secs)}`\n'
                 f'{_trend_icon(this_secs, last_secs)} **{diff_str}**{pct_str}'
             )
-            await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+            await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
-        # ── /weekly send (admin) ──────────────────────────────────────────
-
-        @weekly_group.command(name='send', description='[Admin] Gửi báo cáo tuần ngay')
+        # ── /weekly send (admin) ──────────────────────────────────────────, description='[Admin] Gửi báo cáo tuần ngay')
         @app_commands.default_permissions(administrator=True)
         @app_commands.describe(target='Gửi cho 1 member cụ thể (để trống = tất cả)')
         async def weekly_send(

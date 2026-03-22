@@ -419,3 +419,15 @@ discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an 
 2026-03-21 20:59:39,302 [INFO] aint.trwdat bắt đầu học lúc 20:59:39
 2026-03-21 20:59:39,304 [INFO] [20:59] Checkpoint...
 2026-03-21 21:00:20,916 [INFO] aint.trwdat rời phòng sau 40s
+2026-03-23 00:14:46,148 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-23 00:14:46,197 [INFO] logging in using static token
+2026-03-23 00:14:48,151 [INFO] Shard ID None has connected to Gateway (Session ID: 0b0d4b86015262d8468d109545023985).
+2026-03-23 00:14:50,158 [INFO] ✅ Bot StudyBot ready!
+2026-03-23 00:14:50,159 [INFO] ✅ Pomodoro Cog loaded
+2026-03-23 00:14:50,163 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-23 00:14:50,163 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-23 00:14:50,610 [INFO] Sync 20 cmds → IELTS Master Hub
+2026-03-23 00:14:51,055 [INFO] Sync 20 cmds → Khu Tự Trị
+2026-03-23 00:14:51,055 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-23 00:14:51,060 [INFO] [00:14] Checkpoint...
+2026-03-23 00:16:06,998 [INFO] Quest done [early_bird] → +75 XP cho aint.trwdat

@@ -413,13 +413,8 @@ class PomodoroCog(commands.Cog):
         # Host tự join
         await self._join_group(member, grp)
 
-        # Đăng tin nhắn nhóm
-        announce = await interaction.channel.send(
-            self._build_group_embed(grp),
-            silent=True
-        )
-        grp.announce_msg = announce
-
+        # Respond to interaction FIRST — avoids 3-second Discord timeout
+        # if channel.send() takes too long (e.g. rate-limited, slow shard).
         await interaction.response.send_message(
             f'✅ Đã tạo phòng **"{name}"**!\n'
             f'⚙️ `{work}m làm / {break_}m nghỉ × {rounds} vòng`\n'
@@ -427,6 +422,18 @@ class PomodoroCog(commands.Cog):
             f'▶️ Dùng `/pomodoro start` để bắt đầu khi đủ người!',
             ephemeral=True
         )
+
+        # Đăng tin nhắn nhóm (sau khi đã respond interaction)
+        try:
+            announce = await interaction.channel.send(
+                self._build_group_embed(grp),
+                silent=True
+            )
+            grp.announce_msg = announce
+        except discord.Forbidden:
+            log.warning(f'[Pomodoro] No permission to send in channel {interaction.channel}')
+        except Exception as e:
+            log.error(f'[Pomodoro] pomo_create channel.send error: {e}')
 
     # ── /pomodoro join ───────────────────────────────────────────────────────
 
@@ -614,10 +621,15 @@ class PomodoroCog(commands.Cog):
         data = self._load()
 
         if uid not in data:
-            await interaction.response.send_message(
-                '❌ Bạn chưa có dữ liệu! Hãy vào phòng học trước.', ephemeral=True
-            )
-            return
+            data[uid] = {
+                'name': interaction.user.display_name,
+                'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+            }
+            self._save(data)
 
         # Lưu preset vào file
         data[uid]['pomo_preset'] = {

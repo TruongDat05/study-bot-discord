@@ -1,20 +1,3 @@
-"""
-╔══════════════════════════════════════════════════════════════════╗
-║                   STUDY BOT v4 — FULL UPGRADE                   ║
-║                                                                  ║
-║  Thay đổi v4:                                                    ║
-║  • Thread-safe data I/O (file lock)                             ║
-║  • Badge date tracking (lưu ngày nhận huy hiệu)                 ║
-║  • /remind — nhắc học theo giờ (DM tự động)                     ║
-║  • /help — danh sách lệnh đầy đủ                                ║
-║  • /top_alltime — bảng xếp hạng tổng thời gian                  ║
-║  • /backup — admin backup dữ liệu                               ║
-║  • Notification logic hoàn chỉnh: DM riêng, kênh nhóm đúng lúc ║
-║  • Sửa typo "BẢO CÁO" → "BÁO CÁO"                             ║
-║  • Import weekly_report đúng cách                               ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-
 from __future__ import annotations
 
 import discord
@@ -67,7 +50,7 @@ WARN_BEFORE_KICK    = 10
 WAIT_SECONDS        = 60
 REPORT_HOUR         = 23
 REPORT_MINUTE       = 0
-DAILY_BOARD_HOUR    = 0    # 00:00 giờ Việt Nam
+DAILY_BOARD_HOUR    = 0
 DAILY_BOARD_MINUTE  = 0
 DATA_FILE           = 'study_data.json'
 BACKUP_DIR          = 'backups'
@@ -77,16 +60,8 @@ CHECKPOINT_MINUTES  = 5
 LIVE_UPDATE_MINUTES = 5
 MILESTONE_MINUTES   = [30, 60, 120, 180, 240, 300, 360]
 
-XP_PER_MINUTE    = 10
-# ┌─────────────────────────────────────────────────────────────┐
-# │  LEVEL THRESHOLDS — Try-Hard Curve (khó hơn cũ ~19 lần)   │
-# │  Lv0→1 : ~50 phút          Lv5→6 : ~27h                   │
-# │  Lv1→2 : ~1.7h             Lv6→7 : ~43h                   │
-# │  Lv2→3 : ~4.2h             Lv7→8 : ~67h                   │
-# │  Lv3→4 : ~8.3h             Lv8→9 : ~100h                  │
-# │  Lv4→5 : ~15h              Lv9→10: ~150h                  │
-# │  Tổng lên Max Lv10 ≈ 417 giờ học tích lũy                 │
-# └─────────────────────────────────────────────────────────────┘
+XP_PER_MINUTE = 10
+
 LEVEL_THRESHOLDS = [0, 500, 1500, 4000, 9000, 18000, 34000, 60000, 100000, 160000, 250000]
 LEVEL_NAMES      = [
     'Người mới 🌱', 'Học sinh 📖', 'Chăm chỉ ✏️', 'Tập trung 🎯',
@@ -100,7 +75,7 @@ LEVEL_ROLES: dict[int, str | None] = {
     7: 'Bậc Thầy', 8: 'Thiên Tài', 9: 'Vô Địch', 10: 'Thần Học',
 }
 
-# ─── 🎮 QUEST CONFIG ─────────────────────────────────────────────────────────
+# ─── QUEST CONFIG ────────────────────────────────────────────────────────────
 
 QUEST_POOL = [
     {'id': 'study_30',     'desc': 'Học đủ 30 phút hôm nay',          'target': 30,  'type': 'minutes',    'xp': 50,  'emoji': '⏱️'},
@@ -117,39 +92,30 @@ QUEST_POOL = [
 
 QUEST_DAILY_COUNT = 3
 
-# ─── 🏅 BADGE CONFIG ─────────────────────────────────────────────────────────
+# ─── BADGE CONFIG ─────────────────────────────────────────────────────────────
 
 BADGES: dict[str, dict] = {
-    # Streak
     'streak_3':    {'name': 'Khởi đầu 🌱',      'desc': 'Streak 3 ngày',       'condition': ('streak', 3)},
     'streak_7':    {'name': 'Tuần lễ 📅',        'desc': 'Streak 7 ngày',       'condition': ('streak', 7)},
     'streak_14':   {'name': 'Hai tuần 💪',        'desc': 'Streak 14 ngày',      'condition': ('streak', 14)},
     'streak_30':   {'name': 'Một tháng 🔥',       'desc': 'Streak 30 ngày',      'condition': ('streak', 30)},
     'streak_100':  {'name': 'Huyền thoại 👑',     'desc': 'Streak 100 ngày',     'condition': ('streak', 100)},
-    # Total hours
     'total_1h':    {'name': 'Bước đầu ⏱️',       'desc': 'Tổng cộng 1 giờ',    'condition': ('total_hours', 1)},
     'total_10h':   {'name': 'Chăm chỉ 📚',        'desc': 'Tổng cộng 10 giờ',   'condition': ('total_hours', 10)},
     'total_50h':   {'name': 'Kiên trì ✨',         'desc': 'Tổng cộng 50 giờ',   'condition': ('total_hours', 50)},
     'total_100h':  {'name': 'Trăm giờ 💯',        'desc': 'Tổng cộng 100 giờ',  'condition': ('total_hours', 100)},
     'total_500h':  {'name': 'Bậc thầy ⚡',        'desc': 'Tổng cộng 500 giờ',  'condition': ('total_hours', 500)},
-    # Daily record
     'marathon_4h': {'name': 'Marathon 🏃',        'desc': 'Học 4 tiếng 1 ngày', 'condition': ('daily_hours', 4)},
     'marathon_8h': {'name': 'Siêu marathon 🚀',   'desc': 'Học 8 tiếng 1 ngày', 'condition': ('daily_hours', 8)},
-    # Level
     'level_5':     {'name': 'Xuất sắc ⭐',        'desc': 'Đạt Level 5',         'condition': ('level', 5)},
     'level_10':    {'name': 'Đỉnh cao 👑',         'desc': 'Đạt Level 10 max',    'condition': ('level', 10)},
-    # Special
     'early_bird':  {'name': 'Cú sáng ☀️',        'desc': 'Học trước 8h sáng',   'condition': ('special', 'early_bird')},
     'night_owl':   {'name': 'Cú đêm 🦉',          'desc': 'Học sau 0h đêm',      'condition': ('special', 'night_owl')},
-    # Quest
     'quest_10':    {'name': 'Người thực hiện 📋', 'desc': 'Hoàn thành 10 quest', 'condition': ('quests_done', 10)},
     'quest_50':    {'name': 'Siêu nhiệm vụ 🎯',   'desc': 'Hoàn thành 50 quest', 'condition': ('quests_done', 50)},
-    # XP
     'xp_1000':     {'name': 'Nghìn XP 💰',        'desc': 'Đạt 1.000 XP',        'condition': ('xp', 1000)},
     'xp_10000':    {'name': 'Vạn XP 💎',          'desc': 'Đạt 10.000 XP',       'condition': ('xp', 10000)},
 }
-
-# ─── 💬 MOTIVATIONS — Song ngữ Anh + Việt ────────────────────────────────────
 
 MOTIVATIONS_BILINGUAL = [
     ('"The secret of getting ahead is getting started." — Mark Twain',
@@ -176,69 +142,27 @@ MOTIVATIONS_BILINGUAL = [
      '🌅 Bạn không cần giỏi để bắt đầu, nhưng phải bắt đầu để trở nên giỏi!'),
     ('"Success doesn\'t come from what you do occasionally. It comes from consistency."',
      '📅 Thành công đến từ sự kiên trì mỗi ngày, không phải từ những lúc hứng khởi!'),
-    ('"A little progress each day adds up to big results."',
-     '📈 Mỗi ngày tiến một chút nhỏ sẽ tạo ra kết quả lớn theo thời gian!'),
     ('"One day or day one. You decide."',
      '🔑 "Một ngày nào đó" hay "Ngày một"? Chỉ có bạn mới quyết định được!'),
     ('"Discipline is choosing between what you want now and what you want most."',
      '⚖️ Kỷ luật là lựa chọn giữa điều bạn muốn ngay và điều bạn muốn nhất!'),
     ('"Every master was once a disaster." — T. Harv Eker',
      '🎓 Mỗi chuyên gia đều đã từng là người mới. Đừng ngại sai!'),
-    ('"The only way to do great work is to love what you do." — Steve Jobs',
-     '❤️ Cách duy nhất để làm được việc vĩ đại là yêu thích điều bạn đang làm!'),
-    ('"Education is the most powerful weapon you can use to change the world." — Mandela',
-     '📚 Kiến thức là vũ khí mạnh nhất bạn có thể dùng để thay đổi thế giới!'),
-    ('"The more that you read, the more things you will know." — Dr. Seuss',
-     '📖 Càng đọc nhiều, bạn càng biết nhiều. Càng học nhiều, bạn càng đi xa!'),
-    ('"Strive for progress, not perfection."',
-     '🏃 Hãy tiến về phía trước, không cần hoàn hảo — tiến bộ mới là điều quan trọng!'),
     ('"Believe you can and you\'re halfway there." — Theodore Roosevelt',
      '🌈 Tin rằng bạn làm được và bạn đã đi được nửa chặng đường rồi!'),
     ('"Your future self will thank you for the work you put in today."',
      '🙏 Bản thân tương lai của bạn sẽ cảm ơn những nỗ lực của ngày hôm nay!'),
-    ('"The difference between ordinary and extraordinary is that little extra."',
-     '✨ Sự khác biệt giữa bình thường và xuất sắc chính là chút nỗ lực thêm đó!'),
-    ('"You are capable of more than you know."',
-     '💫 Bạn có khả năng hơn những gì bạn nghĩ. Hãy chứng minh điều đó hôm nay!'),
-    ('"Keep going. Everything you need will come to you at the perfect time."',
-     '⏳ Cứ tiến lên. Mọi thứ bạn cần sẽ đến đúng lúc — chỉ cần không bỏ cuộc!'),
     ('"Work hard in silence. Let success be your noise."',
      '🤫 Làm việc chăm chỉ trong im lặng. Để thành công nói thay bạn!'),
-    ('"Today\'s pain is tomorrow\'s power."',
-     '💥 Sự vất vả hôm nay chính là sức mạnh của ngày mai!'),
-    ('"Rise up, start fresh, see the bright opportunity in each day."',
-     '🌄 Đứng dậy, bắt đầu mới, nhìn thấy cơ hội tươi sáng trong mỗi ngày!'),
-    ('"Be the hardest worker in the room."',
-     '🏆 Hãy là người chăm chỉ nhất trong phòng!'),
-    ('"Knowledge is power. Time is money. Study both."',
-     '⚡ Kiến thức là sức mạnh. Thời gian là tiền bạc. Học cả hai!'),
-    ('"Fall seven times, stand up eight." — Japanese proverb',
-     '🔄 Ngã bảy lần, đứng dậy tám lần. Đó mới là người chiến thắng!'),
-    ('"The journey of a thousand miles begins with one step." — Lao Tzu',
-     '👣 Hành trình vạn dặm bắt đầu từ một bước chân. Bước chân đó là hôm nay!'),
-    ('"Winners don\'t quit and quitters don\'t win."',
-     '🏅 Người thắng không bỏ cuộc, người bỏ cuộc không thắng. Bạn là người thắng!'),
-    ('"Invest in yourself. It pays the best interest."',
-     '💰 Đầu tư vào chính mình là khoản đầu tư sinh lãi cao nhất!'),
     ('"Study now, shine later."',
      '✨ Học chăm chỉ hôm nay — tỏa sáng rực rỡ ngày mai!'),
-    ('"Small daily improvements over time lead to stunning results."',
-     '📊 Cải thiện nhỏ mỗi ngày sẽ tạo ra kết quả đáng kinh ngạc theo thời gian!'),
-    ('"The pain of discipline is nothing like the pain of disappointment." — Justin Langer',
-     '🎽 Đau vì kỷ luật không thấm vào đâu so với đau vì thất vọng bản thân!'),
-    ('"You don\'t get what you wish for. You get what you work for."',
-     '🛠️ Bạn không nhận được điều bạn ước — bạn nhận được điều bạn nỗ lực!'),
-    ('"Every accomplishment starts with the decision to try."',
-     '🌟 Mọi thành tựu đều bắt đầu bằng quyết định thử!'),
-    ('"Motivation gets you going but discipline keeps you growing."',
-     '🌿 Động lực giúp bạn bắt đầu, kỷ luật giúp bạn phát triển!'),
+    ('"Fall seven times, stand up eight." — Japanese proverb',
+     '🔄 Ngã bảy lần, đứng dậy tám lần. Đó mới là người chiến thắng!'),
 ]
 
 def _random_motivation() -> str:
     en, vi = random.choice(MOTIVATIONS_BILINGUAL)
     return f'💬 _{en}_\n\n{vi}'
-
-MOTIVATIONS = [vi for _, vi in MOTIVATIONS_BILINGUAL]
 
 MILESTONE_DM = {
     30:  '⏰ Bạn đã học được **30 phút**! 💪 Tiếp tục nhé — bạn đang làm rất tốt!',
@@ -281,24 +205,22 @@ if OPENROUTER_AVAILABLE and OPENROUTER_API_KEY:
 
 # ─── STATE ───────────────────────────────────────────────────────────────────
 
-pending_checks:     dict[int, asyncio.Task] = {}
-join_times:         dict[int, datetime]     = {}
-last_checkpoint:    dict[int, datetime]     = {}
-milestone_sent:     dict[int, set]          = {}
-live_message_ids:   dict[int, int]          = {}
-daily_first_join:   dict[str, int]          = {}
-session_counts:     dict[int, int]          = {}
-daily_board_sent:   set                     = set()
-report_sent_today:  set                     = set()   # ← dedup cho _send_report
-# remind_tasks: member_id → (hour, asyncio.Task)
-remind_tasks:       dict[int, tuple]        = {}
-# media_active_members: tập ID của những member đang bật Cam hoặc Stream
-media_active_members: set                   = set()
-_dashboard_started: bool                    = False   # ← guard Flask thread, tránh bind port 2 lần
+pending_checks:       dict[int, asyncio.Task] = {}
+join_times:           dict[int, datetime]     = {}
+last_checkpoint:      dict[int, datetime]     = {}
+milestone_sent:       dict[int, set]          = {}
+live_message_ids:     dict[int, int]          = {}
+daily_first_join:     dict[str, int]          = {}
+session_counts:       dict[int, int]          = {}
+daily_board_sent:     set                     = set()
+report_sent_today:    set                     = set()
+remind_tasks:         dict[int, tuple]        = {}
+media_active_members: set                     = set()
+_dashboard_started:   bool                    = False
 
-_data_lock = threading.Lock()   # ← thread-safe file I/O
+_data_lock = threading.Lock()
 
-# ─── MEDIA HELPER ────────────────────────────────────────────────────────────
+# ─── MEDIA HELPERS ───────────────────────────────────────────────────────────
 
 def is_media_active(vs: discord.VoiceState) -> bool:
     return bool(vs.self_video or vs.self_stream)
@@ -327,20 +249,18 @@ def save_data(data: dict):
             tmp = DATA_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, DATA_FILE)  # atomic replace
+            os.replace(tmp, DATA_FILE)
         except IOError as e:
             log.error(f'Lỗi lưu data: {e}')
 
 def backup_data():
-    """Tạo bản backup với timestamp."""
     if not os.path.exists(DATA_FILE):
         return
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts      = datetime.now().strftime('%Y%m%d_%H%M%S')
-    dest    = os.path.join(BACKUP_DIR, f'study_data_{ts}.json')
+    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dest = os.path.join(BACKUP_DIR, f'study_data_{ts}.json')
     try:
         shutil.copy2(DATA_FILE, dest)
-        # Chỉ giữ 30 bản backup gần nhất
         files = sorted(
             [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)],
             key=os.path.getmtime
@@ -365,11 +285,11 @@ def _default_user(name: str) -> dict:
         'goal_seconds': 0,
         'last_absent_warn': '',
         'badges': [],
-        'badge_dates': {},        # ← mới: {badge_id: 'YYYY-MM-DD'}
+        'badge_dates': {},
         'quests_done_total': 0,
         'daily_quests': {},
         'special_flags': [],
-        'remind_hour': None,      # ← mới: giờ nhắc học (None = tắt)
+        'remind_hour': None,
     }
 
 def get_level(xp: int) -> int:
@@ -394,8 +314,8 @@ def _update_streak(data: dict, uid: str, today: str) -> tuple[int, bool]:
         streak += 1
     else:
         streak = 1
-    data[uid]['streak']          = streak
-    data[uid]['longest_streak']  = max(streak, data[uid].get('longest_streak', 0))
+    data[uid]['streak']         = streak
+    data[uid]['longest_streak'] = max(streak, data[uid].get('longest_streak', 0))
     data[uid]['last_study_date'] = today
     return streak, True
 
@@ -404,29 +324,22 @@ def format_time(seconds: int) -> str:
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
-    if h > 0:   return f'{h}h {m}m'
-    if m > 0:   return f'{m}m {s}s'
+    if h > 0:  return f'{h}h {m}m'
+    if m > 0:  return f'{m}m {s}s'
     return f'{s}s'
 
 def _get_live_enriched_data() -> dict:
-    """
-    Trả về data từ disk, bổ sung thêm placeholder cho user đang live
-    nhưng chưa có trong file (chưa qua checkpoint lần nào).
-    Đảm bảo /leaderboard và /studying luôn thấy user ngay từ giây đầu.
-    """
     data = load_data()
     for mid in list(join_times.keys()):
         uid = str(mid)
         if uid in data:
             continue
-        # Tìm tên member từ guilds
         name = f'User {mid}'
         for guild in bot.guilds:
             m = guild.get_member(mid)
             if m:
                 name = m.display_name
                 break
-        # Tạo placeholder in-memory (KHÔNG ghi vào disk)
         data[uid] = _default_user(name)
     return data
 
@@ -460,18 +373,17 @@ def add_study_time(member_id: int, member_name: str, seconds: int) -> dict:
     data[uid]['level'] = new_level
     save_data(data)
     return {
-        'xp_gained':    xp_gained,
-        'level_up':     new_level > old_level,
-        'new_level':    new_level,
-        'streak':       streak,
-        'total_xp':     data[uid]['xp'],
-        'goal':         data[uid].get('goal'),
-        'goal_seconds': data[uid].get('goal_seconds', 0),
-        'today_seconds':data[uid]['daily'].get(today, 0),
+        'xp_gained':     xp_gained,
+        'level_up':      new_level > old_level,
+        'new_level':     new_level,
+        'streak':        streak,
+        'total_xp':      data[uid]['xp'],
+        'goal':          data[uid].get('goal'),
+        'goal_seconds':  data[uid].get('goal_seconds', 0),
+        'today_seconds': data[uid]['daily'].get(today, 0),
     }
 
 def add_xp_direct(uid: str, xp_amount: int):
-    """Cộng XP trực tiếp (dùng cho Pomodoro bonus, v.v.)."""
     data = load_data()
     if uid not in data:
         return
@@ -479,12 +391,13 @@ def add_xp_direct(uid: str, xp_amount: int):
     data[uid]['level'] = get_level(data[uid]['xp'])
     save_data(data)
 
-# ─── 🎮 QUEST SYSTEM ─────────────────────────────────────────────────────────
+# ─── QUEST SYSTEM ────────────────────────────────────────────────────────────
 
-def generate_daily_quests(uid: str, today: str) -> list[dict]:
+def generate_daily_quests(uid: str, today: str, member_name: str = '') -> list[dict]:
     data = load_data()
     if uid not in data:
-        return []
+        data[uid] = _default_user(member_name or f'User {uid}')
+        save_data(data)
     existing = data[uid].get('daily_quests', {}).get(today)
     if existing:
         return existing
@@ -499,17 +412,20 @@ def generate_daily_quests(uid: str, today: str) -> list[dict]:
 def get_quest_info(quest_id: str) -> dict | None:
     return next((q for q in QUEST_POOL if q['id'] == quest_id), None)
 
-def update_quest_progress(uid: str, today: str, override_today_secs: int = None) -> list[str]:
+def update_quest_progress(uid: str, today: str, override_today_secs: int = None, member_name: str = '') -> list[str]:
     data = load_data()
     if uid not in data:
-        return []
+        data[uid] = _default_user(member_name or f'User {uid}')
+        save_data(data)
     quests     = data[uid].get('daily_quests', {}).get(today, [])
-    # Dùng override nếu được truyền (real-time từ current session), fallback về saved data
     today_secs = override_today_secs if override_today_secs is not None else data[uid]['daily'].get(today, 0)
     streak     = data[uid].get('streak', 0)
     now_hour   = datetime.now().hour
-    sessions   = session_counts.get(int(uid), 0)
-    just_done  = []
+    try:
+        sessions = session_counts.get(int(uid), 0)
+    except (ValueError, TypeError):
+        sessions = 0
+    just_done = []
     for q in quests:
         if q['done']:
             continue
@@ -540,7 +456,7 @@ def update_quest_progress(uid: str, today: str, override_today_secs: int = None)
     save_data(data)
     return just_done
 
-# ─── 🏅 BADGE SYSTEM ─────────────────────────────────────────────────────────
+# ─── BADGE SYSTEM ────────────────────────────────────────────────────────────
 
 def check_and_award_badges(uid: str, member: discord.Member = None) -> list[str]:
     data = load_data()
@@ -574,7 +490,6 @@ def check_and_award_badges(uid: str, member: discord.Member = None) -> list[str]
             earned.add(bid)
     if new_badges:
         data[uid]['badges'] = list(earned)
-        # Lưu ngày nhận badge
         badge_dates = data[uid].setdefault('badge_dates', {})
         for bid in new_badges:
             if bid not in badge_dates:
@@ -598,7 +513,7 @@ def format_badges(badge_ids: list) -> str:
     parts = [BADGES[b]['name'] for b in badge_ids if b in BADGES]
     return '  '.join(parts) if parts else '_Chưa có huy hiệu nào_'
 
-# ─── 🖼️ PROFILE CARD ─────────────────────────────────────────────────────────
+# ─── PROFILE CARD ─────────────────────────────────────────────────────────────
 
 def _try_font(paths: list[str], size: int):
     for p in paths:
@@ -670,7 +585,7 @@ def generate_profile_card(member_id: int) -> bytes | None:
     draw.text((cx, cy+26), 'LEVEL',   font=f_sm,   fill=TEXT2,   anchor='mm')
 
     display_name = name if len(name) <= 18 else name[:17] + '…'
-    draw.text((168, 78),  display_name,                    font=f_xl, fill=TEXT1)
+    draw.text((168, 78),  display_name,                         font=f_xl, fill=TEXT1)
     draw.text((170, 112), f'Lv.{level} • {LEVEL_NAMES[level]}', font=f_md, fill=TEXT2)
 
     xp_start = LEVEL_THRESHOLDS[level]
@@ -751,10 +666,10 @@ async def assign_level_role(member: discord.Member, new_level: int, old_level: i
 def record_join(member: discord.Member):
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
-    join_times[member.id]     = now
-    last_checkpoint[member.id] = now   # ← bắt đầu tính giờ từ đúng lúc vào/bật cam
-    milestone_sent[member.id] = set()
-    session_counts[member.id] = session_counts.get(member.id, 0) + 1
+    join_times[member.id]      = now
+    last_checkpoint[member.id] = now
+    milestone_sent[member.id]  = set()
+    session_counts[member.id]  = session_counts.get(member.id, 0) + 1
     if today not in daily_first_join:
         daily_first_join[today] = member.id
     uid = str(member.id)
@@ -762,7 +677,6 @@ def record_join(member: discord.Member):
         award_special_flag(uid, 'night_owl')
     if now.hour < 8:
         award_special_flag(uid, 'early_bird')
-    # Cập nhật trạng thái media khi vào
     if member.voice and is_media_active(member.voice):
         media_active_members.add(member.id)
     else:
@@ -781,7 +695,6 @@ async def _do_checkpoint(member: discord.Member) -> int:
     return elapsed
 
 async def _check_milestones(member: discord.Member):
-    """Kiểm tra mốc thời gian → DM riêng, không gửi kênh nhóm."""
     if member.id not in join_times: return
     total_min = int((datetime.now() - join_times[member.id]).total_seconds()) // 60
     if member.id not in milestone_sent:
@@ -792,15 +705,13 @@ async def _check_milestones(member: discord.Member):
             await safe_send_dm(member, MILESTONE_DM.get(ms, f'⏰ Đã học **{ms} phút**! 💪'))
 
 async def _check_quests_and_badges(member: discord.Member):
-    """Quest + Badge check → DM riêng, không gửi kênh nhóm."""
     uid   = str(member.id)
     today = datetime.now().strftime('%Y-%m-%d')
     generate_daily_quests(uid, today)
-    # Tính real-time secs để quest progress luôn chính xác
-    data        = load_data()
-    saved_secs  = data.get(uid, {}).get('daily', {}).get(today, 0)
+    data       = load_data()
+    saved_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
     if member.id in join_times and member.id in media_active_members:
-        chk = last_checkpoint.get(member.id, join_times[member.id])
+        chk       = last_checkpoint.get(member.id, join_times[member.id])
         real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
     else:
         real_secs = saved_secs
@@ -823,30 +734,33 @@ async def _check_quests_and_badges(member: discord.Member):
         )
 
 async def record_leave_and_notify(member: discord.Member) -> int:
-    """Rời phòng → DM tóm tắt phiên, KHÔNG gửi kênh nhóm."""
     if member.id not in join_times: return 0
+
+    # If member is in an active Pomodoro session, skip manual time save
+    # to avoid double-counting (Pomodoro saves time per round itself)
+    pomo_cog      = bot.cogs.get('PomodoroCog')
+    in_pomodoro   = pomo_cog is not None and member.id in pomo_cog._sessions
+
     now        = datetime.now()
     checkpoint = last_checkpoint.get(member.id, join_times[member.id])
     remaining  = int((now - checkpoint).total_seconds())
-    # Chỉ lưu thời gian còn lại nếu member đang có Cam/Stream bật
-    if remaining > 0 and member.id in media_active_members:
+    if remaining > 0 and member.id in media_active_members and not in_pomodoro:
         add_study_time(member.id, member.display_name, remaining)
+
     total_duration = int((now - join_times.pop(member.id)).total_seconds())
     last_checkpoint.pop(member.id, None)
     milestone_sent.pop(member.id, None)
-    media_active_members.discard(member.id)  # xóa khỏi tracking set
+    media_active_members.discard(member.id)
 
     uid   = str(member.id)
     today = now.strftime('%Y-%m-%d')
     generate_daily_quests(uid, today)
-    # Load 1 lần duy nhất sau khi đã lưu xong để lấy dữ liệu mới nhất
     data_now   = load_data()
     final_secs = data_now.get(uid, {}).get('daily', {}).get(today, 0)
     just_done  = update_quest_progress(uid, today, override_today_secs=final_secs)
     new_badges = check_and_award_badges(uid, member)
 
     if total_duration > 30:
-        # Reload sau khi quest/badge đã cập nhật XP vào disk → đảm bảo level/xp hiển thị đúng
         data = load_data()
         if uid in data:
             info       = data[uid]
@@ -894,7 +808,7 @@ async def update_live_message(server: dict):
     guild     = channel.guild
     voice_ids = server['voice_channels']
     today     = now.strftime('%Y-%m-%d')
-    data      = _get_live_enriched_data()   # ← gộp user live chưa có trong file
+    data      = _get_live_enriched_data()
     active    = []
     for mid, start_time in list(join_times.items()):
         m = guild.get_member(mid)
@@ -902,17 +816,16 @@ async def update_live_message(server: dict):
         if m.voice.channel.id not in voice_ids: continue
         uid   = str(mid)
         saved = data.get(uid, {}).get('daily', {}).get(today, 0)
-        # Chỉ cộng unsaved nếu đang có Cam/Stream
         if mid in media_active_members:
             chk         = last_checkpoint.get(mid, start_time)
             today_total = saved + int((now - chk).total_seconds())
         else:
             today_total = saved
         active.append({
-            'm': m,
+            'm':       m,
             'session': int((now - start_time).total_seconds()),
-            'today': today_total,
-            'icon': media_status_icon(m.voice),
+            'today':   today_total,
+            'icon':    media_status_icon(m.voice),
         })
     active.sort(key=lambda x: x['today'], reverse=True)
     lines = [
@@ -944,7 +857,7 @@ async def update_live_message(server: dict):
                 return
             except discord.NotFound:
                 live_message_ids.pop(channel.id, None)
-        new = await channel.send(content, silent=True)   # live board: silent để không spam
+        new = await channel.send(content, silent=True)
         live_message_ids[channel.id] = new.id
     except Exception as e:
         log.error(f'Live message error: {e}')
@@ -956,7 +869,6 @@ async def update_all_live_messages():
 # ─── DAILY BOARD ─────────────────────────────────────────────────────────────
 
 async def _send_daily_board(target_date: str | None = None):
-    """Gửi bảng tổng kết ngày lúc 00:00 → kênh nhóm, có thông báo."""
     if target_date is None:
         report_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     else:
@@ -965,10 +877,10 @@ async def _send_daily_board(target_date: str | None = None):
     data        = load_data()
     sorted_data = sorted(
         data.items(),
-        key=lambda x: x[1]['daily'].get(report_date, 0),
+        key=lambda x: x[1].get('daily', {}).get(report_date, 0),
         reverse=True,
     )
-    has_data = any(info['daily'].get(report_date, 0) > 0 for _, info in sorted_data)
+    has_data = any(info.get('daily', {}).get(report_date, 0) > 0 for _, info in sorted_data)
     day_fmt  = datetime.strptime(report_date, '%Y-%m-%d').strftime('%d/%m/%Y')
 
     lines = [
@@ -981,7 +893,7 @@ async def _send_daily_board(target_date: str | None = None):
     else:
         rank = 0
         for uid, info in sorted_data:
-            t = info['daily'].get(report_date, 0)
+            t = info.get('daily', {}).get(report_date, 0)
             if t <= 0:
                 continue
             rank  += 1
@@ -998,29 +910,29 @@ async def _send_daily_board(target_date: str | None = None):
                 f'  |  ⚡ `{xp:,} XP`'
             )
 
-    total_today  = sum(info['daily'].get(report_date, 0) for _, info in sorted_data)
-    active_count = sum(1 for _, info in sorted_data if info['daily'].get(report_date, 0) > 0)
+    total_today  = sum(info.get('daily', {}).get(report_date, 0) for _, info in sorted_data)
+    active_count = sum(1 for _, info in sorted_data if info.get('daily', {}).get(report_date, 0) > 0)
     lines += [
         f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
         f'👥 **{active_count} người** học hôm nay · ⏱️ Tổng: **{format_time(total_today)}**',
         f'_Bảng tổng kết tự động mỗi ngày lúc 00:00 🕛_',
     ]
 
-    # Split into ≤1900-char chunks to avoid Discord 2000-char limit
-    chunks = []
-    current = []
+    chunks      = []
+    current     = []
     current_len = 0
     for line in lines:
         line_len = len(line) + 1
         if current_len + line_len > 1900 and current:
             chunks.append('\n'.join(current))
-            current = [line]
+            current     = [line]
             current_len = line_len
         else:
             current.append(line)
             current_len += line_len
     if current:
         chunks.append('\n'.join(current))
+
     for server in SERVERS:
         ch = bot.get_channel(server['report_channel'])
         if ch:
@@ -1034,7 +946,6 @@ async def _send_daily_board(target_date: str | None = None):
 # ─── REMIND SYSTEM ───────────────────────────────────────────────────────────
 
 async def _remind_loop(member: discord.Member, hour: int):
-    """Gửi DM nhắc học mỗi ngày vào đúng giờ đã đặt."""
     while True:
         try:
             now    = datetime.now()
@@ -1044,7 +955,6 @@ async def _remind_loop(member: discord.Member, hour: int):
             delay = (target - now).total_seconds()
             await asyncio.sleep(delay)
 
-            # Kiểm tra xem member đã học hôm nay chưa
             today      = datetime.now().strftime('%Y-%m-%d')
             data       = load_data()
             uid        = str(member.id)
@@ -1141,15 +1051,13 @@ async def scheduled_tasks():
     if now.hour == 9 and now.minute == 0:
         await _check_absences()
 
-    # Backup hàng ngày lúc 4h
     if now.hour == 4 and now.minute == 0:
         backup_data()
 
     if now.hour == 0 and now.minute == 0:
         session_counts.clear()
         daily_first_join.clear()
-        # Keep only the last 2 days in dedup sets to prevent unbounded growth
-        today_key = now.strftime('%Y-%m-%d')
+        today_key     = now.strftime('%Y-%m-%d')
         yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         report_sent_today.intersection_update({today_key, yesterday_key})
         daily_board_sent.intersection_update({today_key, yesterday_key})
@@ -1159,7 +1067,6 @@ async def scheduled_tasks():
 async def checkpoint_task():
     now = datetime.now()
     log.info(f'[{now.strftime("%H:%M")}] Checkpoint...')
-    # Lấy danh sách user đang trong Pomodoro (để không checkpoint 2 lần)
     pomo_cog      = bot.cogs.get('PomodoroCog')
     pomo_sessions = pomo_cog._sessions if pomo_cog else {}
     for mid in list(join_times.keys()):
@@ -1169,21 +1076,17 @@ async def checkpoint_task():
             if m and m.voice and m.voice.channel and m.voice.channel.id in FOCUS_CHANNEL_IDS:
                 member = m; break
         if not member:
-            # Member không còn trong kênh → dọn dẹp stale entry
             join_times.pop(mid, None)
             last_checkpoint.pop(mid, None)
             milestone_sent.pop(mid, None)
             media_active_members.discard(mid)
             continue
-        # Bỏ qua nếu user đang trong Pomodoro (Pomodoro tự quản lý thời gian)
         if mid in pomo_sessions:
             continue
-        # Đồng bộ trạng thái media từ Discord thực tế (cả 2 chiều: add và discard)
         if member.voice and is_media_active(member.voice):
             media_active_members.add(member.id)
         else:
             media_active_members.discard(member.id)
-        # Chỉ checkpoint khi đang có Cam/Stream
         if mid in media_active_members:
             await _do_checkpoint(member)
             await _check_milestones(member)
@@ -1204,12 +1107,12 @@ async def before_checkpoint_task():
 async def _send_report():
     data        = load_data()
     today       = datetime.now().strftime('%Y-%m-%d')
-    sorted_data = sorted(data.items(), key=lambda x: x[1]['daily'].get(today, 0), reverse=True)
+    sorted_data = sorted(data.items(), key=lambda x: x[1].get('daily', {}).get(today, 0), reverse=True)
     lines       = [f'📊 **Báo cáo ngày {today}**\n']
     has_data    = False
-    rank        = 0   # đếm riêng, chỉ tăng khi t > 0
+    rank        = 0
     for uid, info in sorted_data:
-        t = info['daily'].get(today, 0)
+        t = info.get('daily', {}).get(today, 0)
         if t > 0:
             has_data  = True
             rank     += 1
@@ -1219,15 +1122,14 @@ async def _send_report():
                 f'🔥{info.get("streak",0)} — `{format_time(t)}`'
             )
     if not has_data: lines.append('😴 Hôm nay chưa có ai học!')
-    # Split into ≤1900-char chunks to avoid Discord 2000-char limit
-    chunks = []
-    current = []
+    chunks      = []
+    current     = []
     current_len = 0
     for line in lines:
-        line_len = len(line) + 1  # +1 for newline
+        line_len = len(line) + 1
         if current_len + line_len > 1900 and current:
             chunks.append('\n'.join(current))
-            current = [line]
+            current     = [line]
             current_len = line_len
         else:
             current.append(line)
@@ -1244,14 +1146,14 @@ async def _check_absences():
     data      = load_data()
     today     = datetime.now().strftime('%Y-%m-%d')
     warn_date = (datetime.now() - timedelta(days=ABSENT_DAYS_WARN)).strftime('%Y-%m-%d')
-    dirty     = False   # flag: chỉ save_data 1 lần cuối nếu có thay đổi
+    dirty     = False
     for uid, info in data.items():
         last_date   = info.get('last_study_date', '')
         last_warned = info.get('last_absent_warn', '')
         if not last_date or last_date >= warn_date or last_warned == today: continue
         try:
             member_id = int(uid)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
         for guild in bot.guilds:
             m = guild.get_member(member_id)
@@ -1266,7 +1168,7 @@ async def _check_absences():
             dirty = True
             break
     if dirty:
-        save_data(data)   # ghi disk 1 lần duy nhất sau khi xử lý hết tất cả user
+        save_data(data)
 
 # ─── AI ──────────────────────────────────────────────────────────────────────
 
@@ -1301,7 +1203,7 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
     longest = info.get('longest_streak', 0)
     total   = info.get('total', 0)
     today   = datetime.now().strftime('%Y-%m-%d')
-    saved   = info['daily'].get(today, 0)
+    saved   = info.get('daily', {}).get(today, 0)
     if target.id in join_times and target.id in media_active_members:
         chk   = last_checkpoint.get(target.id, join_times[target.id])
         saved += int((datetime.now() - chk).total_seconds())
@@ -1309,15 +1211,15 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
     if lv_now >= len(LEVEL_THRESHOLDS) - 1:
         xp_needed = 0; pct = 100; bar_f = 20
     else:
-        xp_start = LEVEL_THRESHOLDS[lv_now]; xp_end = LEVEL_THRESHOLDS[lv_now + 1]
-        xp_cur   = xp - xp_start; xp_needed = xp_end - xp
-        span     = xp_end - xp_start
-        pct      = int((xp_cur / span) * 100)
-        bar_f    = int((xp_cur / span) * 20)
+        xp_start  = LEVEL_THRESHOLDS[lv_now]; xp_end = LEVEL_THRESHOLDS[lv_now + 1]
+        xp_cur    = xp - xp_start; xp_needed = xp_end - xp
+        span      = xp_end - xp_start
+        pct       = int((xp_cur / span) * 100)
+        bar_f     = int((xp_cur / span) * 20)
     xp_bar    = '█' * bar_f + '░' * (20 - bar_f)
     role_name = LEVEL_ROLES.get(level)
     role_str  = f'🏷️ Role: **{role_name}**\n' if role_name else ''
-    recent    = sorted(info['daily'].items(), reverse=True)[:5]
+    recent    = sorted(info.get('daily', {}).items(), reverse=True)[:5]
     recent_str = ' · '.join([f'`{d[5:]}`{format_time(s)}' for d, s in recent])
     badges    = info.get('badges', [])
     badge_str = format_badges(badges[:6]) if badges else '_Chưa có_'
@@ -1343,38 +1245,41 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
 @bot.tree.command(name='rank', description='Xem bảng XP và thống kê của bạn')
 @app_commands.describe(member='Thành viên (để trống = bản thân)')
 async def slash_rank(interaction: discord.Interaction, member: discord.Member = None):
+    is_self = member is None
+    await interaction.response.defer(ephemeral=is_self)
     target = member or interaction.user
-    await interaction.response.send_message(
-        _build_rank_message(target, _get_live_enriched_data()),  # ← thấy user ngay khi vào phòng
-        ephemeral=(member is None)
+    await interaction.followup.send(
+        _build_rank_message(target, _get_live_enriched_data()),
+        ephemeral=is_self
     )
 
 # ── /quest ─────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='quest', description='Xem nhiệm vụ hàng ngày')
 async def slash_quest(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     uid   = str(interaction.user.id)
     today = datetime.now().strftime('%Y-%m-%d')
-    data  = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
-    if uid not in data:
-        await interaction.response.send_message(
-            '❌ Bạn chưa có dữ liệu! Hãy vào phòng học trước.', ephemeral=True
-        ); return
 
-    # Tính thời gian học thực tế (saved + unsaved từ session hiện tại)
+    raw = load_data()
+    if uid not in raw:
+        raw[uid] = _default_user(interaction.user.display_name)
+        save_data(raw)
+
+    data = _get_live_enriched_data()
+
     mid         = interaction.user.id
     saved_secs  = data[uid]['daily'].get(today, 0)
     if mid in join_times and mid in media_active_members:
-        chk = last_checkpoint.get(mid, join_times[mid])
+        chk             = last_checkpoint.get(mid, join_times[mid])
         real_today_secs = saved_secs + int((datetime.now() - chk).total_seconds())
     else:
         real_today_secs = saved_secs
 
-    # Đảm bảo quest tồn tại, rồi cập nhật progress với real-time secs
     generate_daily_quests(uid, today)
     update_quest_progress(uid, today, override_today_secs=real_today_secs)
 
-    # Reload data sau khi update để lấy progress mới nhất
     data   = load_data()
     quests = data[uid].get('daily_quests', {}).get(today, [])
 
@@ -1395,18 +1300,24 @@ async def slash_quest(interaction: discord.Interaction):
     total_done_ever = data[uid].get('quests_done_total', 0)
     lines.append(f'\n✨ Hôm nay: `{total_done}/{len(quests)}` · Tổng đã làm: `{total_done_ever}` quest')
     lines.append('_Quest tự reset lúc 0h mỗi đêm_')
-    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+    await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
 # ── /badges ────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='badges', description='Xem tất cả huy hiệu')
 @app_commands.describe(member='Thành viên (để trống = bản thân)')
 async def slash_badges(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
     target = member or interaction.user
     uid    = str(target.id)
-    data   = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
+    if target.id == interaction.user.id:
+        raw = load_data()
+        if uid not in raw:
+            raw[uid] = _default_user(interaction.user.display_name)
+            save_data(raw)
+    data   = _get_live_enriched_data()
     if uid not in data:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
         ); return
     earned = set(data[uid].get('badges', []))
@@ -1428,7 +1339,7 @@ async def slash_badges(interaction: discord.Interaction, member: discord.Member 
             cat_parts.append(f'{icon} {bdef.get("name", "?")}')
         lines.append(f'\n**{cat_name}**')
         lines.append('  '.join(cat_parts))
-    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+    await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
 # ── /card ──────────────────────────────────────────────────────────────────
 
@@ -1441,7 +1352,7 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
         await interaction.followup.send(
             '❌ Tính năng `/card` cần **Pillow**: `pip install Pillow`', ephemeral=True
         ); return
-    card_bytes = generate_profile_card(target.id)
+    card_bytes = await asyncio.to_thread(generate_profile_card, target.id)
     if not card_bytes:
         await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu học tập!', ephemeral=True
@@ -1454,24 +1365,30 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
 @bot.tree.command(name='stats', description='Xem thống kê học tập chi tiết')
 @app_commands.describe(member='Thành viên (để trống = bản thân)')
 async def slash_stats(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
     target = member or interaction.user
-    data   = _get_live_enriched_data()   # ← thấy user ngay khi vào phòng
     uid    = str(target.id)
+    if target.id == interaction.user.id:
+        raw = load_data()
+        if uid not in raw:
+            raw[uid] = _default_user(interaction.user.display_name)
+            save_data(raw)
+    data   = _get_live_enriched_data()
     if uid not in data:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
         ); return
     info        = data[uid]
     today       = datetime.now().strftime('%Y-%m-%d')
-    today_saved = info['daily'].get(today, 0)
+    today_saved = info.get('daily', {}).get(today, 0)
     if target.id in join_times and target.id in media_active_members:
         chk         = last_checkpoint.get(target.id, join_times[target.id])
         today_saved += int((datetime.now() - chk).total_seconds())
     xp         = info.get('xp', 0)
-    level      = info.get('level', 0)
+    level      = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
     streak     = info.get('streak', 0)
     _, xp_need = xp_to_next_level(xp)
-    recent     = sorted(info['daily'].items(), reverse=True)[:7]
+    recent     = sorted(info.get('daily', {}).items(), reverse=True)[:7]
     recent_str = '\n'.join([f'  `{d}`: {format_time(s)}' for d, s in recent])
     badges     = info.get('badges', [])
     goal       = info.get('goal')
@@ -1492,45 +1409,56 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
         msg += f'⏰ Nhắc học: `{remind_h:02d}:00` hàng ngày\n'
     msg += f'📅 7 ngày:\n{recent_str}\n'
     msg += f'\n_Dùng `/card` để tạo ảnh profile!_'
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 # ── /leaderboard ───────────────────────────────────────────────────────────
 
 @bot.tree.command(name='leaderboard', description='Bảng xếp hạng hôm nay')
 async def slash_leaderboard(interaction: discord.Interaction):
-    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
+    await interaction.response.defer()
+    data  = _get_live_enriched_data()
     today = datetime.now().strftime('%Y-%m-%d')
     now   = datetime.now()
-    def real_time(uid_str, info):
-        s   = info['daily'].get(today, 0)
-        mid = int(uid_str)
+
+    def real_time(uid_str: str, info: dict) -> int:
+        s = info['daily'].get(today, 0)
+        try:
+            mid = int(uid_str)
+        except (ValueError, TypeError):
+            return s
         if mid in join_times and mid in media_active_members:
             chk = last_checkpoint.get(mid, join_times[mid])
             s  += int((now - chk).total_seconds())
         return s
-    # Pre-compute để tránh gọi real() 2 lần cho mỗi user
+
     entries = [(u, i, real_time(u, i)) for u, i in data.items()]
-    top10 = sorted(
+    top10   = sorted(
         [e for e in entries if e[2] > 0],
         key=lambda x: x[2], reverse=True
     )[:10]
+
     lines = [f'🏆 **Bảng xếp hạng hôm nay** _{today}_\n']
     if not top10:
         lines.append('😴 Chưa có ai học hôm nay!')
     else:
         for i, (uid, info, rt) in enumerate(top10, 1):
             medal  = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f'`{i}.`'
-            active = ' 🟢' if int(uid) in join_times else ''
+            try:
+                is_live = int(uid) in join_times
+            except (ValueError, TypeError):
+                is_live = False
+            active = ' 🟢' if is_live else ''
             lines.append(
                 f'{medal}{active} **{info["name"]}** `Lv.{info.get("level",0)}` '
                 f'🔥{info.get("streak",0)} — `{format_time(rt)}`'
             )
-    await interaction.response.send_message('\n'.join(lines))
+    await interaction.followup.send('\n'.join(lines))
 
 # ── /top_alltime ───────────────────────────────────────────────────────────
 
 @bot.tree.command(name='top_alltime', description='Bảng xếp hạng tổng thời gian học (all-time)')
 async def slash_top_alltime(interaction: discord.Interaction):
+    await interaction.response.defer()
     data  = load_data()
     top10 = sorted(
         [(u, i) for u, i in data.items() if i.get('total', 0) > 0],
@@ -1547,28 +1475,28 @@ async def slash_top_alltime(interaction: discord.Interaction):
                 f'🔥{info.get("streak",0)} · 📚 `{format_time(info.get("total",0))}`'
                 f' · ⚡{info.get("xp",0):,} XP'
             )
-    await interaction.response.send_message('\n'.join(lines))
+    await interaction.followup.send('\n'.join(lines))
 
 # ── /studying ──────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='studying', description='Xem ai đang học ngay lúc này')
 async def slash_studying(interaction: discord.Interaction):
+    await interaction.response.defer()
     now   = datetime.now()
     guild = interaction.guild
     if not guild:
-        await interaction.response.send_message('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
+        await interaction.followup.send('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
         return
-    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
+    data  = _get_live_enriched_data()
     today = now.strftime('%Y-%m-%d')
     lines = ['🟢 **Đang học ngay lúc này**\n']
     count = 0
     for mid, st in sorted(join_times.items()):
-        m = guild.get_member(mid) if guild else None
+        m = guild.get_member(mid)
         if not m or not m.voice: continue
         secs  = int((now - st).total_seconds())
         uid   = str(mid)
         saved = data.get(uid, {}).get('daily', {}).get(today, 0)
-        # Chỉ cộng unsaved khi đang có Cam/Stream
         if mid in media_active_members:
             chk   = last_checkpoint.get(mid, st)
             total = saved + int((now - chk).total_seconds())
@@ -1579,7 +1507,7 @@ async def slash_studying(interaction: discord.Interaction):
         lines.append(f'{icon} **{m.display_name}** | Phiên: `{format_time(secs)}` | Hôm nay: `{format_time(total)}`')
     if count == 0: lines.append('😴 Không có ai đang học...')
     else:          lines.append(f'\n👥 `{count} người`')
-    await interaction.response.send_message('\n'.join(lines))
+    await interaction.followup.send('\n'.join(lines))
 
 # ── /setgoal ───────────────────────────────────────────────────────────────
 
@@ -1591,16 +1519,17 @@ async def slash_setgoal(
     hours:   app_commands.Range[int, 0, 23] = 0,
     minutes: app_commands.Range[int, 0, 59] = 0,
 ):
+    await interaction.response.defer(ephemeral=True)
     total = hours * 3600 + minutes * 60
     if total <= 0:
-        await interaction.response.send_message('❌ Ít nhất 1 phút!', ephemeral=True); return
+        await interaction.followup.send('❌ Ít nhất 1 phút!', ephemeral=True); return
     data = load_data()
     uid  = str(interaction.user.id)
     if uid not in data: data[uid] = _default_user(interaction.user.display_name)
     data[uid]['goal']         = goal
     data[uid]['goal_seconds'] = total
     save_data(data)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f'✅ Mục tiêu: **"{goal}"** — `{format_time(total)}`/ngày 💪', ephemeral=True
     )
 
@@ -1609,11 +1538,11 @@ async def slash_setgoal(
 @bot.tree.command(name='remind', description='Đặt giờ nhắc học hàng ngày qua DM (-1 để tắt)')
 @app_commands.describe(hour='Giờ nhắc (0-23), nhập -1 để tắt')
 async def slash_remind(interaction: discord.Interaction, hour: app_commands.Range[int, -1, 23]):
+    await interaction.response.defer(ephemeral=True)
     uid  = str(interaction.user.id)
     data = load_data()
 
     if hour == -1:
-        # Tắt nhắc
         old = remind_tasks.pop(interaction.user.id, None)
         if old:
             task = old[1]
@@ -1621,7 +1550,7 @@ async def slash_remind(interaction: discord.Interaction, hour: app_commands.Rang
         if uid in data:
             data[uid]['remind_hour'] = None
             save_data(data)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             '🔕 Đã tắt nhắc học.\n_Dùng `/remind <giờ>` để bật lại._', ephemeral=True
         )
         return
@@ -1631,17 +1560,15 @@ async def slash_remind(interaction: discord.Interaction, hour: app_commands.Rang
     data[uid]['remind_hour'] = hour
     save_data(data)
 
-    # Hủy task cũ nếu có
     old = remind_tasks.pop(interaction.user.id, None)
     if old:
         task = old[1]
         if task and not task.done(): task.cancel()
 
-    # Tạo task mới
     t = asyncio.create_task(_remind_loop(interaction.user, hour))
     remind_tasks[interaction.user.id] = (hour, t)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f'⏰ Đã đặt nhắc học lúc **{hour:02d}:00** mỗi ngày!\n'
         f'Bot sẽ DM bạn nhắc nhở và động lực. 💪\n'
         f'_Tắt: `/remind -1`_',
@@ -1660,6 +1587,7 @@ async def slash_ask(interaction: discord.Interaction, question: str):
 
 @bot.tree.command(name='roles', description='Danh sách vai trò theo level')
 async def slash_roles(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     data  = load_data()
     uid   = str(interaction.user.id)
     my_xp = data.get(uid, {}).get('xp', 0) if uid in data else 0
@@ -1671,12 +1599,13 @@ async def slash_roles(interaction: discord.Interaction):
         is_mine = (lv == my_lv); is_done = (my_lv > lv)
         status  = ' ◀ **bạn đây**' if is_mine else (' ✅' if is_done else '')
         lines.append(f'{"✦" if is_mine else ("✔" if is_done else "○")} Lv.**{lv}** `{xp_req:,} XP` → **{rn}**{status}')
-    await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+    await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
 # ── /help ──────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='help', description='Danh sách tất cả lệnh của bot')
 async def slash_help(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     msg = (
         '📚 **STUDY BOT — DANH SÁCH LỆNH**\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
@@ -1715,7 +1644,7 @@ async def slash_help(interaction: discord.Interaction):
         '**⚙️ Admin**\n'
         '`/syncroles` · `/report` · `/dailyboard` · `/updatelive` · `/backup`\n'
     )
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 # ── Admin commands ─────────────────────────────────────────────────────────
 
@@ -1732,8 +1661,8 @@ async def slash_syncroles(interaction: discord.Interaction):
     for uid, info in data.items():
         try:
             member_id = int(uid)
-        except ValueError:
-            continue   # bỏ qua key không hợp lệ
+        except (ValueError, TypeError):
+            continue
         m = guild.get_member(member_id)
         if not m: continue
         await assign_level_role(m, info.get('level', 0), -1)
@@ -1797,11 +1726,11 @@ async def cmd_stats(ctx, member: discord.Member = None):
         await ctx.send(f'❌ **{target.display_name}** chưa có dữ liệu!'); return
     info       = data[uid]
     today      = datetime.now().strftime('%Y-%m-%d')
-    saved      = info['daily'].get(today, 0)
+    saved      = info.get('daily', {}).get(today, 0)
     if target.id in join_times and target.id in media_active_members:
         chk   = last_checkpoint.get(target.id, join_times[target.id])
         saved += int((datetime.now() - chk).total_seconds())
-    recent = sorted(info['daily'].items(), reverse=True)[:7]
+    recent = sorted(info.get('daily', {}).items(), reverse=True)[:7]
     await ctx.send(
         f'📊 **{target.display_name}** — `Lv.{info.get("level",0)}` ⚡{info.get("xp",0):,} XP\n'
         f'🔥 Streak: `{info.get("streak",0)} ngày` | 🕐 Hôm nay: `{format_time(saved)}`\n'
@@ -1811,18 +1740,23 @@ async def cmd_stats(ctx, member: discord.Member = None):
 
 @bot.command(name='leaderboard', aliases=['lb', 'top'])
 async def cmd_leaderboard(ctx):
-    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
+    data  = _get_live_enriched_data()
     today = datetime.now().strftime('%Y-%m-%d')
     now   = datetime.now()
-    def real_time(uid_str, info):
-        s = info['daily'].get(today, 0)
-        mid = int(uid_str)
+
+    def real_time(uid_str: str, info: dict) -> int:
+        s = info.get('daily', {}).get(today, 0)
+        try:
+            mid = int(uid_str)
+        except (ValueError, TypeError):
+            return s
         if mid in join_times and mid in media_active_members:
             chk = last_checkpoint.get(mid, join_times[mid])
             s  += int((now - chk).total_seconds())
         return s
+
     entries = [(u, i, real_time(u, i)) for u, i in data.items()]
-    top10 = sorted(
+    top10   = sorted(
         [e for e in entries if e[2] > 0],
         key=lambda x: x[2], reverse=True
     )[:10]
@@ -1831,8 +1765,11 @@ async def cmd_leaderboard(ctx):
     else:
         for i, (uid, info, rt) in enumerate(top10, 1):
             medal   = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f'`{i}.`'
-            is_live = ' 🟢' if int(uid) in join_times else ''
-            lines.append(f'{medal}{is_live} **{info["name"]}** `Lv.{info.get("level",0)}`'
+            try:
+                is_live = int(uid) in join_times
+            except (ValueError, TypeError):
+                is_live = False
+            lines.append(f'{medal}{" 🟢" if is_live else ""} **{info["name"]}** `Lv.{info.get("level",0)}`'
                          f' 🔥{info.get("streak",0)} — `{format_time(rt)}`')
     await ctx.send('\n'.join(lines))
 
@@ -1843,11 +1780,10 @@ async def cmd_quest(ctx):
     data  = load_data()
     if uid not in data:
         await ctx.send('❌ Chưa có dữ liệu! Vào phòng học trước.'); return
-    # Tính real-time secs
     mid        = ctx.author.id
     saved_secs = data[uid]['daily'].get(today, 0)
     if mid in join_times and mid in media_active_members:
-        chk = last_checkpoint.get(mid, join_times[mid])
+        chk       = last_checkpoint.get(mid, join_times[mid])
         real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
     else:
         real_secs = saved_secs
@@ -1924,7 +1860,6 @@ async def on_ready():
         except Exception as e:
             log.error(f'Pomodoro error: {e}')
 
-    # ⚠️ Load TẤT CẢ cog TRƯỚC khi sync để tránh lệnh bị thiếu sau restart
     await setup_weekly_report(bot, load_data, save_data, BADGES, safe_send_dm)
 
     for guild in bot.guilds:
@@ -1937,22 +1872,21 @@ async def on_ready():
 
     if not scheduled_tasks.is_running():  scheduled_tasks.start()
     if not checkpoint_task.is_running():  checkpoint_task.start()
-    # Bug 4: guard tránh khởi Flask 2 lần khi Discord reconnect (OSError: port in use)
+
     global _dashboard_started
     if not _dashboard_started:
         _dashboard_started = True
         threading.Thread(target=run_dashboard, daemon=True).start()
     log.info(f'🌐 Dashboard: http://localhost:{DASHBOARD_PORT}')
 
-    # Khôi phục remind tasks từ data
-    # Bug 5: hủy task cũ trước khi tạo mới, tránh DM nhắc bị gửi 2 lần khi reconnect
+    # Restore remind tasks — cancel stale tasks first to avoid DM duplicates on reconnect
     data = load_data()
     for uid, info in data.items():
         remind_h = info.get('remind_hour')
         if remind_h is None: continue
         try:
             mid = int(uid)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
         old = remind_tasks.pop(mid, None)
         if old:
@@ -1966,16 +1900,26 @@ async def on_ready():
                 log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00')
                 break
 
+    # Recover members already in voice channels on reconnect.
+    # Skip members already tracked in join_times to avoid resetting their session timer.
     for ch_id in FOCUS_CHANNEL_IDS:
         ch = bot.get_channel(ch_id)
         if ch:
             for m in ch.members:
-                if not m.bot:
-                    record_join(m)
-                    if is_media_active(m.voice):
+                if m.bot:
+                    continue
+                if m.id in join_times:
+                    # Already tracked — just re-sync media state
+                    if m.voice and is_media_active(m.voice):
                         media_active_members.add(m.id)
                     else:
-                        start_check(m, 'bot restart – no cam/stream')
+                        media_active_members.discard(m.id)
+                    continue
+                record_join(m)
+                if m.voice and is_media_active(m.voice):
+                    media_active_members.add(m.id)
+                else:
+                    start_check(m, 'bot restart – no cam/stream')
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -1988,18 +1932,14 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         was_active = is_media_active(before)
         now_active = is_media_active(after)
         if not was_active and now_active:
-            # Bật Cam/Stream → hủy kick, đặt lại checkpoint từ thời điểm này
             cancel_task(member.id)
             media_active_members.add(member.id)
             if member.id not in join_times:
-                # Edge case: chưa được track (vd: bot restart)
                 record_join(member)
             else:
-                # Reset checkpoint về thời điểm bật cam để chỉ tính từ đây
                 last_checkpoint[member.id] = datetime.now()
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
         elif was_active and not now_active:
-            # Tắt Cam/Stream → lưu giờ tích lũy, bắt đầu đếm ngược kick
             media_active_members.discard(member.id)
             await _do_checkpoint(member)
             start_check(member, 'tắt Cam/Stream')
@@ -2009,7 +1949,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     elif joined_focus and not stayed_in_focus:
         record_join(member)
-        # DM động lực song ngữ khi vào phòng
         motivation = _random_motivation()
         await safe_send_dm(member,
             f'👋 Chào mừng **{member.display_name}** vào phòng học!\n\n'
@@ -2218,13 +2157,12 @@ def _update_live_cache():
     global _live_state_cache
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
-    data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
+    data  = _get_live_enriched_data()
     result = []
     for mid, start in join_times.items():
         uid      = str(mid)
         info     = data.get(uid, {})
         saved    = info.get('daily', {}).get(today, 0)
-        # Chỉ cộng unsaved khi đang có Cam/Stream
         if mid in media_active_members:
             chk     = last_checkpoint.get(mid, start)
             unsaved = int((now - chk).total_seconds())
@@ -2248,19 +2186,21 @@ def _update_live_cache():
     result.sort(key=lambda x: x['today_total'], reverse=True)
     _live_state_cache = result
 
-# ─── START ───────────────────────────────────────────────────────────────────
-
-# ─── GLOBAL ERROR HANDLER ───────────────────────────────────────────────────
+# ─── GLOBAL ERROR HANDLER ────────────────────────────────────────────────────
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    log.error(f'Slash command error [{interaction.command.name if interaction.command else "?"}]: {error}')
+    cmd_name = interaction.command.name if interaction.command else '?'
+    log.error(f'Slash command error [{cmd_name}]: {error}', exc_info=error)
+    msg = '❌ Đã xảy ra lỗi! Thử lại sau.'
     try:
         if not interaction.response.is_done():
-            await interaction.response.send_message('❌ Đã xảy ra lỗi! Thử lại sau.', ephemeral=True)
+            await interaction.response.send_message(msg, ephemeral=True)
         else:
-            await interaction.followup.send('❌ Đã xảy ra lỗi! Thử lại sau.', ephemeral=True)
+            await interaction.followup.send(msg, ephemeral=True)
     except Exception:
         pass
+
+# ─── START ───────────────────────────────────────────────────────────────────
 
 bot.run(TOKEN)
