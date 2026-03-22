@@ -217,7 +217,22 @@ class PomodoroCog(commands.Cog):
 
         # Nếu đang trong phòng nhóm → host bấm start để bắt đầu nhóm
         if sess and sess.group_id:
-            await self._start_group_if_host(interaction, sess)
+            handled = await self._start_group_if_host(interaction, sess)
+            if not handled:
+                grp = self._groups.get(sess.group_id)
+                if not grp:
+                    self._sessions.pop(member.id, None)
+                    await interaction.response.send_message(
+                        '❌ Phòng nhóm không còn tồn tại.\n'
+                        'Dùng `/pomodoro start` lại để bắt đầu phiên cá nhân.',
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f'ℹ️ Phòng **"{grp.name}"** đang ở phase `{grp.phase.upper()}`.\n'
+                        f'Chỉ có thể bắt đầu khi phòng đang ở trạng thái **waiting**.',
+                        ephemeral=True
+                    )
             return
 
         # Đang có phiên cá nhân rồi
@@ -251,17 +266,24 @@ class PomodoroCog(commands.Cog):
         )
         self._sessions[member.id] = sess
 
-        # Gửi tin nhắn countdown trong kênh
-        msg = await interaction.channel.send(
-            self._build_personal_embed(sess),
-            silent=True
-        )
-        sess.live_message = msg
+        # Respond to interaction FIRST — prevents timeout if channel.send fails
         await interaction.response.send_message(
             f'🍅 Phiên Pomodoro đã bắt đầu! `{work}m làm / {break_}m nghỉ × {rounds} vòng`\n'
             f'Tin nhắn bên dưới sẽ tự cập nhật mỗi {EDIT_INTERVAL} giây.',
             ephemeral=True
         )
+
+        # Gửi tin nhắn countdown trong kênh (sau khi đã respond interaction)
+        try:
+            msg = await interaction.channel.send(
+                self._build_personal_embed(sess),
+                silent=True
+            )
+            sess.live_message = msg
+        except discord.Forbidden:
+            log.warning(f'[Pomodoro] No permission to send in channel {interaction.channel}')
+        except Exception as e:
+            log.error(f'[Pomodoro] channel.send error: {e}')
 
         # DM bắt đầu
         await self._send_dm(
@@ -645,8 +667,10 @@ class PomodoroCog(commands.Cog):
                 )
 
                 # Chờ hết giờ làm
-                await asyncio.sleep(sess.work_minutes * 60)
-                edit_task.cancel()
+                try:
+                    await asyncio.sleep(sess.work_minutes * 60)
+                finally:
+                    edit_task.cancel()
 
                 # Lưu thời gian học vào data file
                 self._add_study(
@@ -688,8 +712,10 @@ class PomodoroCog(commands.Cog):
                         pass
 
                 edit_task = asyncio.create_task(self._countdown_loop(sess))
-                await asyncio.sleep(sess.break_minutes * 60)
-                edit_task.cancel()
+                try:
+                    await asyncio.sleep(sess.break_minutes * 60)
+                finally:
+                    edit_task.cancel()
 
                 # ── CHUẨN BỊ VÒNG MỚI ──
                 sess.current_round += 1
@@ -773,9 +799,11 @@ class PomodoroCog(commands.Cog):
                         self._group_countdown_loop(grp)
                     )
 
-                await asyncio.sleep(grp.work_minutes * 60)
-                if edit_task and not edit_task.done():
-                    edit_task.cancel()
+                try:
+                    await asyncio.sleep(grp.work_minutes * 60)
+                finally:
+                    if edit_task and not edit_task.done():
+                        edit_task.cancel()
 
                 # Lưu thời gian học và cộng XP cho từng thành viên
                 for sess in list(grp.members.values()):
@@ -864,6 +892,11 @@ class PomodoroCog(commands.Cog):
             pass
         except Exception as e:
             log.error(f'Lỗi _run_group [{grp.name}]: {e}')
+        finally:
+            # Cleanup: remove all member sessions and the group itself
+            for mid in list(grp.members.keys()):
+                self._sessions.pop(mid, None)
+            self._groups.pop(grp.session_id, None)
 
     async def _countdown_loop(self, sess: PomodoroSession):
         """Cập nhật tin nhắn countdown cá nhân mỗi EDIT_INTERVAL giây."""

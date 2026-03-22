@@ -12,6 +12,8 @@
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -66,7 +68,7 @@ def _format_time(seconds: int) -> str:
 def _diff_str(this_week: int, last_week: int) -> str:
     diff = this_week - last_week
     if diff == 0: return 'bằng tuần trước'
-    sign = '+' if diff > 0 else ''
+    sign = '+' if diff > 0 else '-'
     return f'{sign}{_format_time(abs(diff))} so với tuần trước'
 
 def _badges_this_week(info: dict, week_dates: list[str], all_badges: dict) -> list[str]:
@@ -562,7 +564,7 @@ def create_weekly_report_cog(
                 log.info('[WeeklyReport] Ticker khởi động.')
 
         async def cog_unload(self):
-            self._weekly_ticker.cancel()
+            self._weekly_ticker.stop()
 
     return WeeklyReportCog()
 
@@ -579,9 +581,6 @@ async def setup_weekly_report(
         return
     cog = create_weekly_report_cog(bot, load_data_fn, save_data_fn, all_badges, safe_send_dm_fn)
     await bot.add_cog(cog)
-    # Đăng ký slash group
-    try:
-        bot.tree.add_command(cog.weekly_group)
-    except Exception:
-        pass  # Đã được đăng ký rồi
+    # Ghi chú: bot.add_cog tự động đăng ký weekly_group vào bot.tree
+    # KHÔNG gọi bot.tree.add_command(cog.weekly_group) — sẽ gây CommandAlreadyRegistered
     log.info('[WeeklyReport] Cog đã được load.')

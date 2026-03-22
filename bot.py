@@ -15,6 +15,8 @@
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -137,7 +139,7 @@ BADGES: dict[str, dict] = {
     'level_5':     {'name': 'Xuất sắc ⭐',        'desc': 'Đạt Level 5',         'condition': ('level', 5)},
     'level_10':    {'name': 'Đỉnh cao 👑',         'desc': 'Đạt Level 10 max',    'condition': ('level', 10)},
     # Special
-    'early_bird':  {'name': 'Cú sáng ☀️',        'desc': 'Học trước 6h sáng',   'condition': ('special', 'early_bird')},
+    'early_bird':  {'name': 'Cú sáng ☀️',        'desc': 'Học trước 8h sáng',   'condition': ('special', 'early_bird')},
     'night_owl':   {'name': 'Cú đêm 🦉',          'desc': 'Học sau 0h đêm',      'condition': ('special', 'night_owl')},
     # Quest
     'quest_10':    {'name': 'Người thực hiện 📋', 'desc': 'Hoàn thành 10 quest', 'condition': ('quests_done', 10)},
@@ -287,10 +289,12 @@ live_message_ids:   dict[int, int]          = {}
 daily_first_join:   dict[str, int]          = {}
 session_counts:     dict[int, int]          = {}
 daily_board_sent:   set                     = set()
+report_sent_today:  set                     = set()   # ← dedup cho _send_report
 # remind_tasks: member_id → (hour, asyncio.Task)
 remind_tasks:       dict[int, tuple]        = {}
 # media_active_members: tập ID của những member đang bật Cam hoặc Stream
 media_active_members: set                   = set()
+_dashboard_started: bool                    = False   # ← guard Flask thread, tránh bind port 2 lần
 
 _data_lock = threading.Lock()   # ← thread-safe file I/O
 
@@ -618,7 +622,7 @@ def generate_profile_card(member_id: int) -> bytes | None:
     info    = data[uid]
     name    = info.get('name', 'Unknown')
     xp      = info.get('xp', 0)
-    level   = info.get('level', 0)
+    level   = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
     streak  = info.get('streak', 0)
     longest = info.get('longest_streak', 0)
     total   = info.get('total', 0)
@@ -847,7 +851,7 @@ async def record_leave_and_notify(member: discord.Member) -> int:
         if uid in data:
             info       = data[uid]
             xp         = info.get('xp', 0)
-            level      = info.get('level', 0)
+            level      = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
             streak     = info.get('streak', 0)
             today_secs = info['daily'].get(today, 0)
             goal       = info.get('goal')
@@ -968,7 +972,6 @@ async def _send_daily_board(target_date: str | None = None):
     day_fmt  = datetime.strptime(report_date, '%Y-%m-%d').strftime('%d/%m/%Y')
 
     lines = [
-        f'',
         f'📊 **BÁO CÁO NGÀY {day_fmt}**',
         f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
     ]
@@ -1003,12 +1006,27 @@ async def _send_daily_board(target_date: str | None = None):
         f'_Bảng tổng kết tự động mỗi ngày lúc 00:00 🕛_',
     ]
 
-    msg = '\n'.join(lines)
+    # Split into ≤1900-char chunks to avoid Discord 2000-char limit
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > 1900 and current:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append('\n'.join(current))
     for server in SERVERS:
         ch = bot.get_channel(server['report_channel'])
         if ch:
             try:
-                await ch.send(msg)  # bật thông báo
+                for chunk in chunks:
+                    await ch.send(chunk)
                 log.info(f'[DailyBoard] Gửi ngày {report_date} → #{ch.name}')
             except Exception as e:
                 log.error(f'[DailyBoard] Lỗi: {e}')
@@ -1018,34 +1036,40 @@ async def _send_daily_board(target_date: str | None = None):
 async def _remind_loop(member: discord.Member, hour: int):
     """Gửi DM nhắc học mỗi ngày vào đúng giờ đã đặt."""
     while True:
-        now        = datetime.now()
-        target     = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        delay = (target - now).total_seconds()
-        await asyncio.sleep(delay)
+        try:
+            now    = datetime.now()
+            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            delay = (target - now).total_seconds()
+            await asyncio.sleep(delay)
 
-        # Kiểm tra xem member đã học hôm nay chưa
-        today = datetime.now().strftime('%Y-%m-%d')
-        data  = load_data()
-        uid   = str(member.id)
-        today_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
+            # Kiểm tra xem member đã học hôm nay chưa
+            today      = datetime.now().strftime('%Y-%m-%d')
+            data       = load_data()
+            uid        = str(member.id)
+            today_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
 
-        if today_secs == 0:
-            motivation = _random_motivation()
-            await safe_send_dm(member,
-                f'⏰ **Nhắc học lúc {hour:02d}:00!**\n\n'
-                f'{motivation}\n\n'
-                f'📚 Hôm nay bạn chưa học phút nào. Vào phòng thôi! 🔥\n'
-                f'_Tắt nhắc: `/remind off`_'
-            )
-        else:
-            await safe_send_dm(member,
-                f'⏰ **Nhắc học lúc {hour:02d}:00!**\n\n'
-                f'✅ Bạn đã học `{format_time(today_secs)}` hôm nay. Giỏi lắm!\n'
-                f'💪 Tiếp tục vào phòng để tăng thêm nhé!\n'
-                f'_Tắt nhắc: `/remind off`_'
-            )
+            if today_secs == 0:
+                motivation = _random_motivation()
+                await safe_send_dm(member,
+                    f'⏰ **Nhắc học lúc {hour:02d}:00!**\n\n'
+                    f'{motivation}\n\n'
+                    f'📚 Hôm nay bạn chưa học phút nào. Vào phòng thôi! 🔥\n'
+                    f'_Tắt nhắc: `/remind -1`_'
+                )
+            else:
+                await safe_send_dm(member,
+                    f'⏰ **Nhắc học lúc {hour:02d}:00!**\n\n'
+                    f'✅ Bạn đã học `{format_time(today_secs)}` hôm nay. Giỏi lắm!\n'
+                    f'💪 Tiếp tục vào phòng để tăng thêm nhé!\n'
+                    f'_Tắt nhắc: `/remind -1`_'
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(f'[Remind] Lỗi vòng lặp nhắc học {member.display_name}: {e}')
+            await asyncio.sleep(60)
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -1103,7 +1127,10 @@ async def scheduled_tasks():
     now = datetime.now()
 
     if now.hour == REPORT_HOUR and now.minute == REPORT_MINUTE:
-        await _send_report()
+        report_key = now.strftime('%Y-%m-%d')
+        if report_key not in report_sent_today:
+            report_sent_today.add(report_key)
+            await _send_report()
 
     if now.hour == DAILY_BOARD_HOUR and now.minute == DAILY_BOARD_MINUTE:
         today_key = now.strftime('%Y-%m-%d')
@@ -1121,6 +1148,11 @@ async def scheduled_tasks():
     if now.hour == 0 and now.minute == 0:
         session_counts.clear()
         daily_first_join.clear()
+        # Keep only the last 2 days in dedup sets to prevent unbounded growth
+        today_key = now.strftime('%Y-%m-%d')
+        yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+        report_sent_today.intersection_update({today_key, yesterday_key})
+        daily_board_sent.intersection_update({today_key, yesterday_key})
         log.info('Reset session counts & daily_first_join.')
 
 @tasks.loop(minutes=CHECKPOINT_MINUTES)
@@ -1146,9 +1178,11 @@ async def checkpoint_task():
         # Bỏ qua nếu user đang trong Pomodoro (Pomodoro tự quản lý thời gian)
         if mid in pomo_sessions:
             continue
-        # Đồng bộ trạng thái media từ Discord thực tế
+        # Đồng bộ trạng thái media từ Discord thực tế (cả 2 chiều: add và discard)
         if member.voice and is_media_active(member.voice):
             media_active_members.add(member.id)
+        else:
+            media_active_members.discard(member.id)
         # Chỉ checkpoint khi đang có Cam/Stream
         if mid in media_active_members:
             await _do_checkpoint(member)
@@ -1156,6 +1190,14 @@ async def checkpoint_task():
             await _check_quests_and_badges(member)
     await update_all_live_messages()
     _update_live_cache()
+
+@scheduled_tasks.before_loop
+async def before_scheduled_tasks():
+    await bot.wait_until_ready()
+
+@checkpoint_task.before_loop
+async def before_checkpoint_task():
+    await bot.wait_until_ready()
 
 # ─── REPORTS ─────────────────────────────────────────────────────────────────
 
@@ -1177,10 +1219,26 @@ async def _send_report():
                 f'🔥{info.get("streak",0)} — `{format_time(t)}`'
             )
     if not has_data: lines.append('😴 Hôm nay chưa có ai học!')
-    msg = '\n'.join(lines)
+    # Split into ≤1900-char chunks to avoid Discord 2000-char limit
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > 1900 and current:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append('\n'.join(current))
     for server in SERVERS:
         ch = bot.get_channel(server['report_channel'])
-        if ch: await ch.send(msg)
+        if ch:
+            for chunk in chunks:
+                await ch.send(chunk)
 
 async def _check_absences():
     data      = load_data()
@@ -1191,8 +1249,12 @@ async def _check_absences():
         last_date   = info.get('last_study_date', '')
         last_warned = info.get('last_absent_warn', '')
         if not last_date or last_date >= warn_date or last_warned == today: continue
+        try:
+            member_id = int(uid)
+        except ValueError:
+            continue
         for guild in bot.guilds:
-            m = guild.get_member(int(uid))
+            m = guild.get_member(member_id)
             if not m: continue
             days = (datetime.now() - datetime.strptime(last_date, '%Y-%m-%d')).days
             await safe_send_dm(m,
@@ -1234,7 +1296,7 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
         return f'❌ **{target.display_name}** chưa có dữ liệu!'
     info    = data[uid]
     xp      = info.get('xp', 0)
-    level   = info.get('level', 0)
+    level   = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
     streak  = info.get('streak', 0)
     longest = info.get('longest_streak', 0)
     total   = info.get('total', 0)
@@ -1493,6 +1555,9 @@ async def slash_top_alltime(interaction: discord.Interaction):
 async def slash_studying(interaction: discord.Interaction):
     now   = datetime.now()
     guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
+        return
     data  = _get_live_enriched_data()   # ← gộp user live chưa có trong file
     today = now.strftime('%Y-%m-%d')
     lines = ['🟢 **Đang học ngay lúc này**\n']
@@ -1541,14 +1606,14 @@ async def slash_setgoal(
 
 # ── /remind ────────────────────────────────────────────────────────────────
 
-@bot.tree.command(name='remind', description='Đặt giờ nhắc học hàng ngày qua DM')
+@bot.tree.command(name='remind', description='Đặt giờ nhắc học hàng ngày qua DM (-1 để tắt)')
 @app_commands.describe(hour='Giờ nhắc (0-23), nhập -1 để tắt')
-async def slash_remind(interaction: discord.Interaction, hour: int):
+async def slash_remind(interaction: discord.Interaction, hour: app_commands.Range[int, -1, 23]):
     uid  = str(interaction.user.id)
     data = load_data()
 
-    if hour == -1 or hour < 0:
-        # Tắt nhắc — chỉ xử lý nếu user đã có data hoặc có task đang chạy
+    if hour == -1:
+        # Tắt nhắc
         old = remind_tasks.pop(interaction.user.id, None)
         if old:
             task = old[1]
@@ -1560,9 +1625,6 @@ async def slash_remind(interaction: discord.Interaction, hour: int):
             '🔕 Đã tắt nhắc học.\n_Dùng `/remind <giờ>` để bật lại._', ephemeral=True
         )
         return
-
-    if not (0 <= hour <= 23):
-        await interaction.response.send_message('❌ Giờ phải từ 0 đến 23!', ephemeral=True); return
 
     if uid not in data:
         data[uid] = _default_user(interaction.user.display_name)
@@ -1640,11 +1702,16 @@ async def slash_help(interaction: discord.Interaction):
         '`/pomodoro status` — Xem tiến độ\n'
         '`/pomodoro create <tên>` — Tạo phòng nhóm\n'
         '`/pomodoro join <tên>` — Tham gia phòng nhóm\n'
-        '`/pomodoro stats` — Lịch sử Pomodoro\n\n'
+        '`/pomodoro leave` — Rời phòng nhóm\n'
+        '`/pomodoro list` — Xem danh sách phòng nhóm\n'
+        '`/pomodoro stats` — Lịch sử Pomodoro\n'
+        '`/pomodoro preset` — Lưu cấu hình yêu thích\n\n'
         '**📅 Báo cáo tuần**\n'
         '`/weekly preview` — Xem trước báo cáo tuần\n'
         '`/weekly on/off` — Bật/tắt báo cáo tuần\n'
-        '`/weekly status` — Trạng thái báo cáo\n\n'
+        '`/weekly status` — Trạng thái báo cáo\n'
+        '`/weekly leaderboard` — Top học nhiều nhất tuần này\n'
+        '`/weekly compare` — So sánh tuần này vs tuần trước\n\n'
         '**⚙️ Admin**\n'
         '`/syncroles` · `/report` · `/dailyboard` · `/updatelive` · `/backup`\n'
     )
@@ -1656,8 +1723,11 @@ async def slash_help(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def slash_syncroles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
+        return
     data    = load_data()
-    guild   = interaction.guild
     updated = 0
     for uid, info in data.items():
         try:
@@ -1854,6 +1924,9 @@ async def on_ready():
         except Exception as e:
             log.error(f'Pomodoro error: {e}')
 
+    # ⚠️ Load TẤT CẢ cog TRƯỚC khi sync để tránh lệnh bị thiếu sau restart
+    await setup_weekly_report(bot, load_data, save_data, BADGES, safe_send_dm)
+
     for guild in bot.guilds:
         try:
             bot.tree.copy_global_to(guild=guild)
@@ -1864,20 +1937,32 @@ async def on_ready():
 
     if not scheduled_tasks.is_running():  scheduled_tasks.start()
     if not checkpoint_task.is_running():  checkpoint_task.start()
-    threading.Thread(target=run_dashboard, daemon=True).start()
-    await setup_weekly_report(bot, load_data, save_data, BADGES, safe_send_dm)
+    # Bug 4: guard tránh khởi Flask 2 lần khi Discord reconnect (OSError: port in use)
+    global _dashboard_started
+    if not _dashboard_started:
+        _dashboard_started = True
+        threading.Thread(target=run_dashboard, daemon=True).start()
     log.info(f'🌐 Dashboard: http://localhost:{DASHBOARD_PORT}')
 
     # Khôi phục remind tasks từ data
+    # Bug 5: hủy task cũ trước khi tạo mới, tránh DM nhắc bị gửi 2 lần khi reconnect
     data = load_data()
     for uid, info in data.items():
         remind_h = info.get('remind_hour')
         if remind_h is None: continue
+        try:
+            mid = int(uid)
+        except ValueError:
+            continue
+        old = remind_tasks.pop(mid, None)
+        if old:
+            old_task = old[1]
+            if old_task and not old_task.done(): old_task.cancel()
         for guild in bot.guilds:
-            m = guild.get_member(int(uid))
+            m = guild.get_member(mid)
             if m:
                 t = asyncio.create_task(_remind_loop(m, remind_h))
-                remind_tasks[int(uid)] = (remind_h, t)
+                remind_tasks[mid] = (remind_h, t)
                 log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00')
                 break
 
@@ -2164,5 +2249,18 @@ def _update_live_cache():
     _live_state_cache = result
 
 # ─── START ───────────────────────────────────────────────────────────────────
+
+# ─── GLOBAL ERROR HANDLER ───────────────────────────────────────────────────
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    log.error(f'Slash command error [{interaction.command.name if interaction.command else "?"}]: {error}')
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message('❌ Đã xảy ra lỗi! Thử lại sau.', ephemeral=True)
+        else:
+            await interaction.followup.send('❌ Đã xảy ra lỗi! Thử lại sau.', ephemeral=True)
+    except Exception:
+        pass
 
 bot.run(TOKEN)
