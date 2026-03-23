@@ -217,6 +217,7 @@ report_sent_today:    set                     = set()
 remind_tasks:         dict[int, tuple]        = {}
 media_active_members: set                     = set()
 _dashboard_started:   bool                    = False
+_quest_notified:      dict[str, set]           = {}
 
 _data_lock = threading.Lock()
 
@@ -284,6 +285,7 @@ def _default_user(name: str) -> dict:
         'goal': None,
         'goal_seconds': 0,
         'last_absent_warn': '',
+        'xp_acc_secs': 0,
         'badges': [],
         'badge_dates': {},
         'quests_done_total': 0,
@@ -362,7 +364,9 @@ def add_study_time(member_id: int, member_name: str, seconds: int) -> dict:
     data[uid]['name'] = member_name
     data[uid]['daily'][today] = data[uid]['daily'].get(today, 0) + seconds
     data[uid]['total']        = data[uid].get('total', 0) + seconds
-    xp_gained = (seconds // 60) * XP_PER_MINUTE
+    xp_acc    = data[uid].get('xp_acc_secs', 0) + seconds
+    xp_gained = (xp_acc // 60) * XP_PER_MINUTE
+    data[uid]['xp_acc_secs'] = xp_acc % 60
     old_xp    = data[uid].get('xp', 0)
     old_level = get_level(old_xp)
     streak, is_new_day = _update_streak(data, uid, today)
@@ -717,14 +721,18 @@ async def _check_quests_and_badges(member: discord.Member):
         real_secs = saved_secs
     just_done  = update_quest_progress(uid, today, override_today_secs=real_secs)
     new_badges = check_and_award_badges(uid, member)
+    notify_key = f'{uid}:{today}'
+    notified   = _quest_notified.setdefault(notify_key, set())
     for qid in just_done:
-        info = get_quest_info(qid)
-        if info:
-            await safe_send_dm(member,
-                f'🎉 **Nhiệm vụ hoàn thành!**\n'
-                f'{info["emoji"]} _{info["desc"]}_\n'
-                f'⚡ Nhận được: **+{info["xp"]} XP bonus!**'
-            )
+        if qid not in notified:
+            notified.add(qid)
+            info = get_quest_info(qid)
+            if info:
+                await safe_send_dm(member,
+                    f'🎉 **Nhiệm vụ hoàn thành!**\n'
+                    f'{info["emoji"]} _{info["desc"]}_\n'
+                    f'⚡ Nhận được: **+{info["xp"]} XP bonus!**'
+                )
     for bid in new_badges:
         bdef = BADGES.get(bid, {})
         await safe_send_dm(member,
@@ -758,6 +766,8 @@ async def record_leave_and_notify(member: discord.Member) -> int:
     data_now   = load_data()
     final_secs = data_now.get(uid, {}).get('daily', {}).get(today, 0)
     just_done  = update_quest_progress(uid, today, override_today_secs=final_secs)
+    for qid in just_done:
+        _quest_notified.setdefault(f'{uid}:{today}', set()).add(qid)
     new_badges = check_and_award_badges(uid, member)
 
     if total_duration > 30:
@@ -1057,6 +1067,7 @@ async def scheduled_tasks():
     if now.hour == 0 and now.minute == 0:
         session_counts.clear()
         daily_first_join.clear()
+        _quest_notified.clear()
         today_key     = now.strftime('%Y-%m-%d')
         yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         report_sent_today.intersection_update({today_key, yesterday_key})

@@ -431,3 +431,28 @@ discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an 
 2026-03-23 00:14:51,055 [INFO] 🌐 Dashboard: http://localhost:5000
 2026-03-23 00:14:51,060 [INFO] [00:14] Checkpoint...
 2026-03-23 00:16:06,998 [INFO] Quest done [early_bird] → +75 XP cho aint.trwdat
+2026-03-23 00:19:14,614 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-23 00:19:14,657 [INFO] logging in using static token
+2026-03-23 00:19:16,645 [INFO] Shard ID None has connected to Gateway (Session ID: 3020710065d530d1211e5d01c526e021).
+2026-03-23 00:19:18,653 [INFO] ✅ Bot StudyBot ready!
+2026-03-23 00:19:18,653 [INFO] ✅ Pomodoro Cog loaded
+2026-03-23 00:19:18,654 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-23 00:19:18,654 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-23 00:19:19,237 [INFO] Sync 20 cmds → IELTS Master Hub
+2026-03-23 00:19:19,802 [INFO] Sync 20 cmds → Khu Tự Trị
+2026-03-23 00:19:19,804 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-23 00:19:19,807 [INFO] [00:19] Checkpoint...
+2026-03-23 00:21:50,430 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-23 00:21:50,473 [INFO] logging in using static token
+2026-03-23 00:21:52,320 [INFO] Shard ID None has connected to Gateway (Session ID: 6c2b72e3e2a867f9db00c7e3555ac46c).
+2026-03-23 00:21:54,329 [INFO] ✅ Bot StudyBot ready!
+2026-03-23 00:21:54,329 [INFO] ✅ Pomodoro Cog loaded
+2026-03-23 00:21:54,330 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-23 00:21:54,330 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-23 00:21:54,717 [INFO] Sync 20 cmds → IELTS Master Hub
+2026-03-23 00:21:55,128 [INFO] Sync 20 cmds → Khu Tự Trị
+2026-03-23 00:21:55,128 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-23 00:21:55,129 [INFO] [00:21] Checkpoint...
+2026-03-23 00:22:00,563 [INFO] aint.trwdat bắt đầu học lúc 00:22:00
+2026-03-23 00:22:01,358 [INFO] aint.trwdat vào phòng không có Cam/Stream → 60s countdown.
+2026-03-23 00:22:06,934 [INFO] aint.trwdat rời phòng sau 6s
