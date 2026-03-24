@@ -407,7 +407,7 @@ def generate_daily_quests(uid: str, today: str, member_name: str = '') -> list[d
     streak = data[uid].get('streak', 0)
     pool   = [q for q in QUEST_POOL if not (q['type'] == 'streak' and streak >= q['target'])]
     chosen = random.sample(pool, min(QUEST_DAILY_COUNT, len(pool)))
-    quests = [{'id': q['id'], 'progress': 0, 'done': False} for q in chosen]
+    quests = [{'id': q['id'], 'progress': 0, 'done': False, 'notified': False} for q in chosen]
     data[uid].setdefault('daily_quests', {})[today] = quests
     save_data(data)
     return quests
@@ -430,7 +430,7 @@ def update_quest_progress(uid: str, today: str, override_today_secs: int = None,
         sessions = 0
     just_done = []
     for q in quests:
-        if q['done']:
+        if q.get('done'):
             continue
         info   = get_quest_info(q['id'])
         if not info:
@@ -447,7 +447,7 @@ def update_quest_progress(uid: str, today: str, override_today_secs: int = None,
             if first_id and str(first_id) == uid: q['progress'] = target
         elif t == 'sessions':   q['progress'] = min(target, sessions)
 
-        if q['progress'] >= target and not q['done']:
+        if q['progress'] >= target and not q.get('done'):
             q['done']     = True
             q['notified'] = False
             just_done.append(q['id'])
@@ -648,22 +648,36 @@ def generate_profile_card(member_id: int) -> bytes | None:
 
 # ─── ROLE MANAGEMENT ─────────────────────────────────────────────────────────
 
-async def assign_level_role(member: discord.Member, new_level: int, old_level: int):
-    if new_level == old_level:
-        return
+async def _ensure_role_synced(member: discord.Member, current_level: int):
     guild = member.guild
+    expected_role_name = LEVEL_ROLES.get(current_level)
+    expected_role = discord.utils.get(guild.roles, name=expected_role_name) if expected_role_name else None
+
+    roles_to_remove = []
+    has_expected = False
+
+    member_roles = member.roles
+
     for lvl, role_name in LEVEL_ROLES.items():
         if role_name is None: continue
         role = discord.utils.get(guild.roles, name=role_name)
-        if role and role in member.roles and lvl != new_level:
-            try: await member.remove_roles(role, reason=f'Level → Lv.{new_level}')
-            except Exception as e: log.error(f'Lỗi thu hồi role: {e}')
-    new_role_name = LEVEL_ROLES.get(new_level)
-    if not new_role_name: return
-    new_role = discord.utils.get(guild.roles, name=new_role_name)
-    if new_role and new_role not in member.roles:
-        try: await member.add_roles(new_role, reason=f'Đạt Lv.{new_level}')
-        except Exception as e: log.error(f'Lỗi gán role: {e}')
+        if role and role in member_roles:
+            if role == expected_role:
+                has_expected = True
+            else:
+                roles_to_remove.append(role)
+
+    if roles_to_remove:
+        try:
+            await member.remove_roles(*roles_to_remove, reason=f'Role sync -> Lv.{current_level}')
+        except Exception as e:
+            log.error(f'Lỗi thu hồi role của {member.display_name}: {e}')
+
+    if expected_role and not has_expected:
+        try:
+            await member.add_roles(expected_role, reason=f'Role sync -> Lv.{current_level}')
+        except Exception as e:
+            log.error(f'Lỗi gán role cho {member.display_name}: {e}')
 
 # ─── SESSION MANAGEMENT ──────────────────────────────────────────────────────
 
@@ -715,33 +729,42 @@ async def _check_quests_and_badges(member: discord.Member):
     generate_daily_quests(uid, today)
     data       = load_data()
     saved_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
-    old_level  = data.get(uid, {}).get('level', 0)
+    
     if member.id in join_times and member.id in media_active_members:
         chk       = last_checkpoint.get(member.id, join_times[member.id])
         real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
     else:
         real_secs = saved_secs
+        
     update_quest_progress(uid, today, override_today_secs=real_secs)
     data_fresh = load_data()
     quests     = data_fresh.get(uid, {}).get('daily_quests', {}).get(today, [])
     new_level  = data_fresh.get(uid, {}).get('level', 0)
-    if new_level > old_level:
-        await assign_level_role(member, new_level, old_level)
+    
     notify_changed = False
+    msgs_to_send = []
     for q in quests:
-        if q.get('done') and not q.get('notified', True):
+        if q.get('done') and not q.get('notified', False):
             info = get_quest_info(q['id'])
             if info:
-                await safe_send_dm(member,
-                    f'🎉 **Nhiệm vụ hoàn thành!**\n'
-                    f'{info["emoji"]} _{info["desc"]}_\n'
-                    f'⚡ Nhận được: **+{info["xp"]} XP bonus!**'
-                )
+                msgs_to_send.append(info)
             q['notified']  = True
             notify_changed = True
+            
     if notify_changed:
         data_fresh[uid]['daily_quests'][today] = quests
         save_data(data_fresh)
+
+    # Await block decoupled from save to prevent load-save race conditions
+    await _ensure_role_synced(member, new_level)
+    
+    for info in msgs_to_send:
+        await safe_send_dm(member,
+            f'🎉 **Nhiệm vụ hoàn thành!**\n'
+            f'{info["emoji"]} _{info["desc"]}_\n'
+            f'⚡ Nhận được: **+{info["xp"]} XP bonus!**'
+        )
+        
     new_badges = check_and_award_badges(uid, member)
     for bid in new_badges:
         bdef = BADGES.get(bid, {})
@@ -778,12 +801,14 @@ async def record_leave_and_notify(member: discord.Member) -> int:
     data_after   = load_data()
     quests_after = data_after.get(uid, {}).get('daily_quests', {}).get(today, [])
     just_done_info: list[dict] = []
+    
     for q in quests_after:
-        if q.get('done') and not q.get('notified', True):
+        if q.get('done') and not q.get('notified', False):
             info = get_quest_info(q['id'])
             if info:
                 just_done_info.append(info)
             q['notified'] = True
+            
     if just_done_info:
         data_after[uid]['daily_quests'][today] = quests_after
         save_data(data_after)
@@ -821,11 +846,14 @@ async def record_leave_and_notify(member: discord.Member) -> int:
             if new_badges:
                 bnames = [BADGES[b]['name'] for b in new_badges if b in BADGES]
                 msg += f'\n🏅 **Badge mới:** ' + ' · '.join(bnames)
+            
+            await _ensure_role_synced(member, level)
             old_lv = get_level(xp - xp_session)
             if level > old_lv:
                 msg += f'\n\n🎉 **LEVEL UP! Lv.{level} {LEVEL_NAMES[level]}** 🎊'
-                await assign_level_role(member, level, old_lv)
+            
             await safe_send_dm(member, msg)
+            
     return total_duration
 
 # ─── LIVE MESSAGE ─────────────────────────────────────────────────────────────
@@ -1112,16 +1140,23 @@ async def checkpoint_task():
             continue
         if mid in pomo_sessions:
             continue
-        if member.voice and is_media_active(member.voice):
-            media_active_members.add(member.id)
-        else:
-            media_active_members.discard(member.id)
-        if mid in media_active_members:
+            
+        was_active = mid in media_active_members
+        now_active = bool(member.voice and is_media_active(member.voice))
+        
+        if was_active:
             elapsed, result = await _do_checkpoint(member)
-            if result.get('level_up'):
-                await assign_level_role(member, result['new_level'], result['new_level'] - 1)
+            if result and result.get('level_up'):
+                await _ensure_role_synced(member, result['new_level'])
             await _check_milestones(member)
             await _check_quests_and_badges(member)
+        
+        if now_active and not was_active:
+            media_active_members.add(mid)
+            last_checkpoint[mid] = datetime.now()
+        elif not now_active and was_active:
+            media_active_members.discard(mid)
+            
     await update_all_live_messages()
     _update_live_cache()
 
@@ -1321,13 +1356,13 @@ async def slash_quest(interaction: discord.Interaction):
         if not info: continue
         pct    = min(100, int(q['progress'] / max(1, info['target']) * 100))
         bar    = '█' * (pct // 10) + '░' * (10 - pct // 10)
-        status = '✅' if q['done'] else '🔲'
-        xp_str = f'+{info["xp"]} XP ✓' if q['done'] else f'{info["xp"]} XP'
+        status = '✅' if q.get('done') else '🔲'
+        xp_str = f'+{info["xp"]} XP ✓' if q.get('done') else f'{info["xp"]} XP'
         lines.append(
             f'{status} {info["emoji"]} **{info["desc"]}**\n'
             f'   `{bar}` {q["progress"]}/{info["target"]}  _{xp_str}_'
         )
-        if q['done']: total_done += 1
+        if q.get('done'): total_done += 1
     total_done_ever = data[uid].get('quests_done_total', 0)
     lines.append(f'\n✨ Hôm nay: `{total_done}/{len(quests)}` · Tổng đã làm: `{total_done_ever}` quest')
     lines.append('_Quest tự reset lúc 0h mỗi đêm_')
@@ -1696,7 +1731,7 @@ async def slash_syncroles(interaction: discord.Interaction):
             continue
         m = guild.get_member(member_id)
         if not m: continue
-        await assign_level_role(m, info.get('level', 0), -1)
+        await _ensure_role_synced(m, info.get('level', 0))
         updated += 1
     await interaction.followup.send(f'✅ Đã sync **{updated}** thành viên.', ephemeral=True)
 
@@ -1828,7 +1863,7 @@ async def cmd_quest(ctx):
         if not info: continue
         pct    = min(100, int(q['progress'] / max(1, info['target']) * 100))
         bar    = '█' * (pct // 10) + '░' * (10 - pct // 10)
-        status = '✅' if q['done'] else '🔲'
+        status = '✅' if q.get('done') else '🔲'
         lines.append(
             f'{status} {info["emoji"]} **{info["desc"]}** — '
             f'`{bar}` {q["progress"]}/{info["target"]} (+{info["xp"]} XP)'
@@ -1910,25 +1945,35 @@ async def on_ready():
         threading.Thread(target=run_dashboard, daemon=True).start()
     log.info(f'🌐 Dashboard: http://localhost:{DASHBOARD_PORT}')
 
-    # Restore remind tasks — cancel stale tasks first to avoid DM duplicates on reconnect
+    # Restore remind tasks and sync roles on recovery
     data = load_data()
     for uid, info in data.items():
-        remind_h = info.get('remind_hour')
-        if remind_h is None: continue
         try:
             mid = int(uid)
         except (ValueError, TypeError):
             continue
-        old = remind_tasks.pop(mid, None)
-        if old:
-            old_task = old[1]
-            if old_task and not old_task.done(): old_task.cancel()
+        
+        # Restore reminders
+        remind_h = info.get('remind_hour')
+        if remind_h is not None:
+            old = remind_tasks.pop(mid, None)
+            if old:
+                old_task = old[1]
+                if old_task and not old_task.done(): old_task.cancel()
+            for guild in bot.guilds:
+                m = guild.get_member(mid)
+                if m:
+                    t = asyncio.create_task(_remind_loop(m, remind_h))
+                    remind_tasks[mid] = (remind_h, t)
+                    log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00')
+                    break
+        
+        # Sync roles
+        level = info.get('level', 0)
         for guild in bot.guilds:
             m = guild.get_member(mid)
             if m:
-                t = asyncio.create_task(_remind_loop(m, remind_h))
-                remind_tasks[mid] = (remind_h, t)
-                log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00')
+                asyncio.create_task(_ensure_role_synced(m, level))
                 break
 
     # Recover members already in voice channels on reconnect.
@@ -1971,8 +2016,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 last_checkpoint[member.id] = datetime.now()
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
         elif was_active and not now_active:
+            elapsed, result = await _do_checkpoint(member)
+            if result and result.get('level_up'):
+                await _ensure_role_synced(member, result['new_level'])
+            await _check_quests_and_badges(member)
             media_active_members.discard(member.id)
-            await _do_checkpoint(member)  # save time up to this point; result discarded (no level-up notification needed mid-session here)
             start_check(member, 'tắt Cam/Stream')
             await safe_send_dm(member,
                 f'⚠️ Vừa tắt Cam/Stream!\n'

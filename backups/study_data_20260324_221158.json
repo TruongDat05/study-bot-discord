@@ -1,0 +1,87 @@
+{
+  "864831093525577738": {
+    "name": "aint.trwdat",
+    "daily": {
+      "2026-03-18": 82,
+      "2026-03-21": 973,
+      "2026-03-24": 42
+    },
+    "total": 1097,
+    "xp": 300,
+    "level": 0,
+    "streak": 1,
+    "longest_streak": 1,
+    "last_study_date": "2026-03-24",
+    "goal": null,
+    "goal_seconds": 0,
+    "last_absent_warn": "",
+    "daily_quests": {
+      "2026-03-21": [
+        {
+          "id": "study_60",
+          "progress": 16,
+          "done": false
+        },
+        {
+          "id": "night_owl",
+          "progress": 0,
+          "done": false
+        },
+        {
+          "id": "study_30",
+          "progress": 16,
+          "done": false
+        }
+      ],
+      "2026-03-23": [
+        {
+          "id": "two_sessions",
+          "progress": 1,
+          "done": false
+        },
+        {
+          "id": "early_bird",
+          "progress": 8,
+          "done": true
+        },
+        {
+          "id": "study_180",
+          "progress": 0,
+          "done": false
+        }
+      ],
+      "2026-03-24": [
+        {
+          "id": "night_owl",
+          "progress": 22,
+          "done": true,
+          "notified": true
+        },
+        {
+          "id": "study_30",
+          "progress": 1,
+          "done": false
+        },
+        {
+          "id": "streak_3",
+          "progress": 1,
+          "done": false
+        }
+      ]
+    },
+    "quests_done_total": 2,
+    "special_flags": [
+      "night_owl",
+      "early_bird"
+    ],
+    "badges": [
+      "night_owl",
+      "early_bird"
+    ],
+    "badge_dates": {
+      "early_bird": "2026-03-23",
+      "night_owl": "2026-03-23"
+    },
+    "xp_acc_secs": 42
+  }
+}
