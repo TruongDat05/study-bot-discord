@@ -217,7 +217,6 @@ report_sent_today:    set                     = set()
 remind_tasks:         dict[int, tuple]        = {}
 media_active_members: set                     = set()
 _dashboard_started:   bool                    = False
-_quest_notified:      dict[str, set]           = {}
 
 _data_lock = threading.Lock()
 
@@ -449,7 +448,8 @@ def update_quest_progress(uid: str, today: str, override_today_secs: int = None,
         elif t == 'sessions':   q['progress'] = min(target, sessions)
 
         if q['progress'] >= target and not q['done']:
-            q['done'] = True
+            q['done']     = True
+            q['notified'] = False
             just_done.append(q['id'])
             data[uid]['quests_done_total'] = data[uid].get('quests_done_total', 0) + 1
             xp_bonus = info.get('xp', 0)
@@ -687,16 +687,17 @@ def record_join(member: discord.Member):
         media_active_members.discard(member.id)
     log.info(f'{member.display_name} bắt đầu học lúc {now.strftime("%H:%M:%S")}')
 
-async def _do_checkpoint(member: discord.Member) -> int:
-    if member.id not in join_times: return 0
+async def _do_checkpoint(member: discord.Member) -> tuple[int, dict]:
+    if member.id not in join_times: return 0, {}
     now        = datetime.now()
     checkpoint = last_checkpoint.get(member.id, join_times[member.id])
     elapsed    = int((now - checkpoint).total_seconds())
+    result: dict = {}
     if elapsed > 0:
-        add_study_time(member.id, member.display_name, elapsed)
+        result = add_study_time(member.id, member.display_name, elapsed)
         last_checkpoint[member.id] = now
         log.info(f'[Checkpoint] {member.display_name}: +{format_time(elapsed)}')
-    return elapsed
+    return elapsed, result
 
 async def _check_milestones(member: discord.Member):
     if member.id not in join_times: return
@@ -714,25 +715,34 @@ async def _check_quests_and_badges(member: discord.Member):
     generate_daily_quests(uid, today)
     data       = load_data()
     saved_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
+    old_level  = data.get(uid, {}).get('level', 0)
     if member.id in join_times and member.id in media_active_members:
         chk       = last_checkpoint.get(member.id, join_times[member.id])
         real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
     else:
         real_secs = saved_secs
-    just_done  = update_quest_progress(uid, today, override_today_secs=real_secs)
-    new_badges = check_and_award_badges(uid, member)
-    notify_key = f'{uid}:{today}'
-    notified   = _quest_notified.setdefault(notify_key, set())
-    for qid in just_done:
-        if qid not in notified:
-            notified.add(qid)
-            info = get_quest_info(qid)
+    update_quest_progress(uid, today, override_today_secs=real_secs)
+    data_fresh = load_data()
+    quests     = data_fresh.get(uid, {}).get('daily_quests', {}).get(today, [])
+    new_level  = data_fresh.get(uid, {}).get('level', 0)
+    if new_level > old_level:
+        await assign_level_role(member, new_level, old_level)
+    notify_changed = False
+    for q in quests:
+        if q.get('done') and not q.get('notified', True):
+            info = get_quest_info(q['id'])
             if info:
                 await safe_send_dm(member,
                     f'🎉 **Nhiệm vụ hoàn thành!**\n'
                     f'{info["emoji"]} _{info["desc"]}_\n'
                     f'⚡ Nhận được: **+{info["xp"]} XP bonus!**'
                 )
+            q['notified']  = True
+            notify_changed = True
+    if notify_changed:
+        data_fresh[uid]['daily_quests'][today] = quests
+        save_data(data_fresh)
+    new_badges = check_and_award_badges(uid, member)
     for bid in new_badges:
         bdef = BADGES.get(bid, {})
         await safe_send_dm(member,
@@ -744,8 +754,6 @@ async def _check_quests_and_badges(member: discord.Member):
 async def record_leave_and_notify(member: discord.Member) -> int:
     if member.id not in join_times: return 0
 
-    # If member is in an active Pomodoro session, skip manual time save
-    # to avoid double-counting (Pomodoro saves time per round itself)
     pomo_cog      = bot.cogs.get('PomodoroCog')
     in_pomodoro   = pomo_cog is not None and member.id in pomo_cog._sessions
 
@@ -765,9 +773,21 @@ async def record_leave_and_notify(member: discord.Member) -> int:
     generate_daily_quests(uid, today)
     data_now   = load_data()
     final_secs = data_now.get(uid, {}).get('daily', {}).get(today, 0)
-    just_done  = update_quest_progress(uid, today, override_today_secs=final_secs)
-    for qid in just_done:
-        _quest_notified.setdefault(f'{uid}:{today}', set()).add(qid)
+
+    update_quest_progress(uid, today, override_today_secs=final_secs)
+    data_after   = load_data()
+    quests_after = data_after.get(uid, {}).get('daily_quests', {}).get(today, [])
+    just_done_info: list[dict] = []
+    for q in quests_after:
+        if q.get('done') and not q.get('notified', True):
+            info = get_quest_info(q['id'])
+            if info:
+                just_done_info.append(info)
+            q['notified'] = True
+    if just_done_info:
+        data_after[uid]['daily_quests'][today] = quests_after
+        save_data(data_after)
+
     new_badges = check_and_award_badges(uid, member)
 
     if total_duration > 30:
@@ -795,9 +815,8 @@ async def record_leave_and_notify(member: discord.Member) -> int:
                 progress = min(100, int((today_secs / goal_secs) * 100))
                 bar = '█' * (progress // 10) + '░' * (10 - progress // 10)
                 msg += f'\n🎯 **{goal}**: `{bar}` {progress}%'
-            if just_done:
-                names = [get_quest_info(q)['emoji'] + ' ' + get_quest_info(q)['desc']
-                         for q in just_done if get_quest_info(q)]
+            if just_done_info:
+                names = [qi['emoji'] + ' ' + qi['desc'] for qi in just_done_info]
                 msg += f'\n\n🎉 **Quest hoàn thành:** ' + ' · '.join(names)
             if new_badges:
                 bnames = [BADGES[b]['name'] for b in new_badges if b in BADGES]
@@ -1067,7 +1086,6 @@ async def scheduled_tasks():
     if now.hour == 0 and now.minute == 0:
         session_counts.clear()
         daily_first_join.clear()
-        _quest_notified.clear()
         today_key     = now.strftime('%Y-%m-%d')
         yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         report_sent_today.intersection_update({today_key, yesterday_key})
@@ -1099,7 +1117,9 @@ async def checkpoint_task():
         else:
             media_active_members.discard(member.id)
         if mid in media_active_members:
-            await _do_checkpoint(member)
+            elapsed, result = await _do_checkpoint(member)
+            if result.get('level_up'):
+                await assign_level_role(member, result['new_level'], result['new_level'] - 1)
             await _check_milestones(member)
             await _check_quests_and_badges(member)
     await update_all_live_messages()
@@ -1952,7 +1972,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
         elif was_active and not now_active:
             media_active_members.discard(member.id)
-            await _do_checkpoint(member)
+            await _do_checkpoint(member)  # save time up to this point; result discarded (no level-up notification needed mid-session here)
             start_check(member, 'tắt Cam/Stream')
             await safe_send_dm(member,
                 f'⚠️ Vừa tắt Cam/Stream!\n'
@@ -1974,7 +1994,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 await update_live_message(server); break
 
     elif left_focus and not stayed_in_focus:
-        media_active_members.discard(member.id)
         duration = await record_leave_and_notify(member)
         cancel_task(member.id)
         log.info(f'{member.display_name} rời phòng sau {format_time(duration)}')

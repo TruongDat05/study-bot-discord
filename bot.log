@@ -456,3 +456,19 @@ discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an 
 2026-03-23 00:22:00,563 [INFO] aint.trwdat bắt đầu học lúc 00:22:00
 2026-03-23 00:22:01,358 [INFO] aint.trwdat vào phòng không có Cam/Stream → 60s countdown.
 2026-03-23 00:22:06,934 [INFO] aint.trwdat rời phòng sau 6s
+2026-03-24 21:26:08,391 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-24 21:26:08,445 [INFO] logging in using static token
+2026-03-24 21:26:10,353 [INFO] Shard ID None has connected to Gateway (Session ID: 772e1dcd13b4a584d26a4cf61821dc1b).
+2026-03-24 21:26:12,355 [INFO] ✅ Bot StudyBot ready!
+2026-03-24 21:26:12,356 [INFO] ✅ Pomodoro Cog loaded
+2026-03-24 21:26:12,358 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-24 21:26:12,358 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-24 21:26:12,790 [INFO] Sync 20 cmds → IELTS Master Hub
+2026-03-24 21:26:13,188 [INFO] Sync 20 cmds → Khu Tự Trị
+2026-03-24 21:26:13,189 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-24 21:26:13,191 [INFO] aint.trwdat bắt đầu học lúc 21:26:13
+2026-03-24 21:26:13,192 [INFO] [21:26] Checkpoint...
+2026-03-24 21:26:56,367 [INFO] aint.trwdat rời phòng sau 42s
+2026-03-24 21:26:56,841 [INFO] aint.trwdat bắt đầu học lúc 21:26:56
+2026-03-24 21:26:57,334 [INFO] aint.trwdat vào phòng không có Cam/Stream → 60s countdown.
+2026-03-24 21:27:10,592 [INFO] aint.trwdat bật Cam/Stream → bắt đầu tính giờ từ bây giờ
