@@ -502,3 +502,19 @@ discord.app_commands.errors.CommandInvokeError: Command 'leaderboard' raised an 
 2026-03-24 22:29:22,871 [INFO] dn bắt đầu học lúc 22:29:22
 2026-03-24 22:29:22,872 [INFO] [22:29] Checkpoint...
 2026-03-24 22:29:22,876 [INFO] Quest done [night_owl] → +75 XP cho User 1209166837275824260
+2026-03-25 09:53:57,877 [WARNING] davey is not installed, voice will NOT be supported
+2026-03-25 09:53:57,936 [INFO] logging in using static token
+2026-03-25 09:54:00,289 [INFO] Shard ID None has connected to Gateway (Session ID: 836378a1e33e54c25689a4b1d055b128).
+2026-03-25 09:54:02,299 [INFO] ✅ Bot StudyBot ready!
+2026-03-25 09:54:02,301 [INFO] ✅ Pomodoro Cog loaded
+2026-03-25 09:54:02,306 [INFO] [WeeklyReport] Ticker khởi động.
+2026-03-25 09:54:02,307 [INFO] [WeeklyReport] Cog đã được load.
+2026-03-25 09:54:02,808 [INFO] Sync 20 cmds → IELTS Master Hub
+2026-03-25 09:54:03,274 [INFO] Sync 20 cmds → Khu Tự Trị
+2026-03-25 09:54:03,275 [INFO] 🌐 Dashboard: http://localhost:5000
+2026-03-25 09:54:03,281 [INFO] [09:54] Checkpoint...
+2026-03-25 09:54:15,617 [INFO] aint.trwdat bắt đầu học lúc 09:54:15
+2026-03-25 09:54:16,380 [INFO] aint.trwdat vào phòng không có Cam/Stream → 60s countdown.
+2026-03-25 09:54:28,712 [INFO] aint.trwdat bật Cam/Stream → bắt đầu tính giờ từ bây giờ
+2026-03-25 09:55:22,007 [INFO] Quest done [first_in] → +60 XP cho aint.trwdat
+2026-03-25 09:56:05,778 [INFO] [WeeklyReport] Gửi: 1 DM, bỏ qua: 9

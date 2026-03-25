@@ -417,7 +417,8 @@ def create_weekly_report_cog(
             )
             await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
-        # ── /weekly send (admin) ──────────────────────────────────────────, description='[Admin] Gửi báo cáo tuần ngay')
+        # ── /weekly send (admin) ──────────────────────────────────────────
+        @weekly_group.command(name='send', description='[Admin] Gửi báo cáo tuần ngay')
         @app_commands.default_permissions(administrator=True)
         @app_commands.describe(target='Gửi cho 1 member cụ thể (để trống = tất cả)')
         async def weekly_send(

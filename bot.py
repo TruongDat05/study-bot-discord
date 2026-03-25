@@ -53,6 +53,7 @@ REPORT_MINUTE       = 0
 DAILY_BOARD_HOUR    = 0
 DAILY_BOARD_MINUTE  = 0
 DATA_FILE           = 'study_data.json'
+RUNTIME_STATE_FILE  = 'runtime_state.json'
 BACKUP_DIR          = 'backups'
 DASHBOARD_PORT      = 5000
 ABSENT_DAYS_WARN    = 2
@@ -219,6 +220,7 @@ media_active_members: set                     = set()
 _dashboard_started:   bool                    = False
 
 _data_lock = threading.Lock()
+_runtime_lock = threading.Lock()
 
 # ─── MEDIA HELPERS ───────────────────────────────────────────────────────────
 
@@ -252,6 +254,140 @@ def save_data(data: dict):
             os.replace(tmp, DATA_FILE)
         except IOError as e:
             log.error(f'Lỗi lưu data: {e}')
+
+def _serialize_dt(dt: datetime) -> str:
+    return dt.isoformat()
+
+def _parse_dt(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+def save_runtime_state():
+    now = datetime.now()
+    snapshot = {
+        'saved_at': now.strftime('%Y-%m-%d'),
+        'join_times': {str(mid): _serialize_dt(ts) for mid, ts in join_times.items()},
+        'last_checkpoint': {str(mid): _serialize_dt(ts) for mid, ts in last_checkpoint.items()},
+        'milestone_sent': {str(mid): sorted(list(ms)) for mid, ms in milestone_sent.items()},
+        'daily_first_join': {d: int(mid) for d, mid in daily_first_join.items()},
+        'session_counts': {str(mid): int(cnt) for mid, cnt in session_counts.items()},
+        'media_active_members': sorted(list(media_active_members)),
+    }
+    with _runtime_lock:
+        try:
+            tmp = RUNTIME_STATE_FILE + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, RUNTIME_STATE_FILE)
+        except IOError as e:
+            log.error(f'Lỗi lưu runtime state: {e}')
+
+def load_runtime_state() -> dict:
+    with _runtime_lock:
+        try:
+            if os.path.exists(RUNTIME_STATE_FILE):
+                with open(RUNTIME_STATE_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            log.error(f'Lỗi đọc runtime state: {e}')
+    return {}
+
+def restore_runtime_state():
+    raw = load_runtime_state()
+    if not raw:
+        return
+
+    now = datetime.now()
+    today = now.strftime('%Y-%m-%d')
+    saved_at = raw.get('saved_at')
+    same_day = saved_at == today
+
+    restored_join: dict[int, datetime] = {}
+    restored_checkpoint: dict[int, datetime] = {}
+    restored_milestones: dict[int, set] = {}
+    restored_media: set[int] = set()
+    restored_sessions: dict[int, int] = {}
+    restored_first_join: dict[str, int] = {}
+
+    for mid_str, ts_str in raw.get('join_times', {}).items():
+        try:
+            mid = int(mid_str)
+        except (ValueError, TypeError):
+            continue
+        ts = _parse_dt(ts_str)
+        if ts is None:
+            continue
+        if ts > now:
+            ts = now
+        restored_join[mid] = ts
+
+    for mid_str, ts_str in raw.get('last_checkpoint', {}).items():
+        try:
+            mid = int(mid_str)
+        except (ValueError, TypeError):
+            continue
+        if mid not in restored_join:
+            continue
+        ts = _parse_dt(ts_str)
+        if ts is None:
+            continue
+        if ts < restored_join[mid]:
+            ts = restored_join[mid]
+        if ts > now:
+            ts = now
+        restored_checkpoint[mid] = ts
+
+    for mid in restored_join:
+        restored_checkpoint.setdefault(mid, restored_join[mid])
+
+    for mid_str, vals in raw.get('milestone_sent', {}).items():
+        try:
+            mid = int(mid_str)
+        except (ValueError, TypeError):
+            continue
+        if mid not in restored_join:
+            continue
+        if not isinstance(vals, list):
+            continue
+        clean = {int(v) for v in vals if isinstance(v, int)}
+        restored_milestones[mid] = clean
+
+    for mid in raw.get('media_active_members', []):
+        if isinstance(mid, int) and mid in restored_join:
+            restored_media.add(mid)
+
+    if same_day:
+        for mid_str, cnt in raw.get('session_counts', {}).items():
+            try:
+                mid = int(mid_str)
+                cnt_i = int(cnt)
+            except (ValueError, TypeError):
+                continue
+            if cnt_i > 0:
+                restored_sessions[mid] = cnt_i
+        for d, mid in raw.get('daily_first_join', {}).items():
+            if isinstance(d, str) and isinstance(mid, int):
+                restored_first_join[d] = mid
+
+    join_times.clear()
+    join_times.update(restored_join)
+    last_checkpoint.clear()
+    last_checkpoint.update(restored_checkpoint)
+    milestone_sent.clear()
+    milestone_sent.update(restored_milestones)
+    media_active_members.clear()
+    media_active_members.update(restored_media)
+    session_counts.clear()
+    session_counts.update(restored_sessions)
+    daily_first_join.clear()
+    daily_first_join.update(restored_first_join)
+
+    log.info(
+        f'[Runtime] Restored {len(join_times)} phiên, '
+        f'{len(media_active_members)} đang active media.'
+    )
 
 def backup_data():
     if not os.path.exists(DATA_FILE):
@@ -649,6 +785,7 @@ def generate_profile_card(member_id: int) -> bytes | None:
 # ─── ROLE MANAGEMENT ─────────────────────────────────────────────────────────
 
 async def _ensure_role_synced(member: discord.Member, current_level: int):
+    current_level = max(0, min(int(current_level), len(LEVEL_THRESHOLDS) - 1))
     guild = member.guild
     expected_role_name = LEVEL_ROLES.get(current_level)
     expected_role = discord.utils.get(guild.roles, name=expected_role_name) if expected_role_name else None
@@ -699,6 +836,7 @@ def record_join(member: discord.Member):
         media_active_members.add(member.id)
     else:
         media_active_members.discard(member.id)
+    save_runtime_state()
     log.info(f'{member.display_name} bắt đầu học lúc {now.strftime("%H:%M:%S")}')
 
 async def _do_checkpoint(member: discord.Member) -> tuple[int, dict]:
@@ -710,6 +848,7 @@ async def _do_checkpoint(member: discord.Member) -> tuple[int, dict]:
     if elapsed > 0:
         result = add_study_time(member.id, member.display_name, elapsed)
         last_checkpoint[member.id] = now
+        save_runtime_state()
         log.info(f'[Checkpoint] {member.display_name}: +{format_time(elapsed)}')
     return elapsed, result
 
@@ -721,6 +860,7 @@ async def _check_milestones(member: discord.Member):
     for ms in MILESTONE_MINUTES:
         if total_min >= ms and ms not in milestone_sent[member.id]:
             milestone_sent[member.id].add(ms)
+            save_runtime_state()
             await safe_send_dm(member, MILESTONE_DM.get(ms, f'⏰ Đã học **{ms} phút**! 💪'))
 
 async def _check_quests_and_badges(member: discord.Member):
@@ -755,7 +895,6 @@ async def _check_quests_and_badges(member: discord.Member):
         data_fresh[uid]['daily_quests'][today] = quests
         save_data(data_fresh)
 
-    # Await block decoupled from save to prevent load-save race conditions
     await _ensure_role_synced(member, new_level)
     
     for info in msgs_to_send:
@@ -774,22 +913,26 @@ async def _check_quests_and_badges(member: discord.Member):
             f'Dùng `/badges` để xem tất cả huy hiệu!'
         )
 
-async def record_leave_and_notify(member: discord.Member) -> int:
+async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: bool = False) -> int:
     if member.id not in join_times: return 0
 
     pomo_cog      = bot.cogs.get('PomodoroCog')
-    in_pomodoro   = pomo_cog is not None and member.id in pomo_cog._sessions
+    in_pomodoro   = force_in_pomodoro or (pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {}))
 
     now        = datetime.now()
     checkpoint = last_checkpoint.get(member.id, join_times[member.id])
     remaining  = int((now - checkpoint).total_seconds())
     if remaining > 0 and member.id in media_active_members and not in_pomodoro:
-        add_study_time(member.id, member.display_name, remaining)
+        result = add_study_time(member.id, member.display_name, remaining)
+        if result and result.get('level_up'):
+            await _ensure_role_synced(member, result['new_level'])
+            await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{result["new_level"]} {LEVEL_NAMES[result["new_level"]]}** 🎊')
 
     total_duration = int((now - join_times.pop(member.id)).total_seconds())
     last_checkpoint.pop(member.id, None)
     milestone_sent.pop(member.id, None)
     media_active_members.discard(member.id)
+    save_runtime_state()
 
     uid   = str(member.id)
     today = now.strftime('%Y-%m-%d')
@@ -814,25 +957,26 @@ async def record_leave_and_notify(member: discord.Member) -> int:
         save_data(data_after)
 
     new_badges = check_and_award_badges(uid, member)
+    
+    data_final = load_data()
+    if uid in data_final:
+        info       = data_final[uid]
+        xp         = info.get('xp', 0)
+        level      = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
+        streak     = info.get('streak', 0)
+        today_secs = info['daily'].get(today, 0)
+        goal       = info.get('goal')
+        goal_secs  = info.get('goal_seconds', 0)
 
-    if total_duration > 30:
-        data = load_data()
-        if uid in data:
-            info       = data[uid]
-            xp         = info.get('xp', 0)
-            level      = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
-            streak     = info.get('streak', 0)
-            today_secs = info['daily'].get(today, 0)
-            goal       = info.get('goal')
-            goal_secs  = info.get('goal_seconds', 0)
-            xp_session = (total_duration // 60) * XP_PER_MINUTE
+        await _ensure_role_synced(member, level)
 
+        if total_duration > 30:
             msg = (
                 f'✅ **Phiên học kết thúc!**\n'
                 f'──────────────────\n'
                 f'⏱️ Phiên này: `{format_time(total_duration)}`\n'
                 f'📅 Hôm nay: `{format_time(today_secs)}`\n'
-                f'⚡ XP: `~+{xp_session} XP`\n'
+                f'⚡ Tổng XP: `{xp:,} XP`\n'
                 f'📊 Level: `Lv.{level} {LEVEL_NAMES[level]}`\n'
                 f'🔥 Streak: `{streak} ngày`'
             )
@@ -847,12 +991,21 @@ async def record_leave_and_notify(member: discord.Member) -> int:
                 bnames = [BADGES[b]['name'] for b in new_badges if b in BADGES]
                 msg += f'\n🏅 **Badge mới:** ' + ' · '.join(bnames)
             
-            await _ensure_role_synced(member, level)
-            old_lv = get_level(xp - xp_session)
-            if level > old_lv:
-                msg += f'\n\n🎉 **LEVEL UP! Lv.{level} {LEVEL_NAMES[level]}** 🎊'
-            
             await safe_send_dm(member, msg)
+        else:
+            for info_q in just_done_info:
+                await safe_send_dm(member,
+                    f'🎉 **Nhiệm vụ hoàn thành!**\n'
+                    f'{info_q["emoji"]} _{info_q["desc"]}_\n'
+                    f'⚡ Nhận được: **+{info_q["xp"]} XP bonus!**'
+                )
+            for bid in new_badges:
+                bdef = BADGES.get(bid, {})
+                await safe_send_dm(member,
+                    f'🏅 **Huy hiệu mới: {bdef.get("name", bid)}!**\n'
+                    f'_{bdef.get("desc", "")}_\n'
+                    f'Dùng `/badges` để xem tất cả huy hiệu!'
+                )
             
     return total_duration
 
@@ -1048,6 +1201,52 @@ async def safe_send_dm(member: discord.Member, message: str):
     except Exception as e:
         log.error(f'DM error: {e}')
 
+async def _force_stop_pomodoro_if_active(member: discord.Member, reason: str = 'rời phòng học') -> bool:
+    """
+    Đồng bộ với PomodoroCog để tránh tiếp tục cộng thời gian/XP khi user rời phòng học.
+    Giữ logic tương đương `/pomodoro stop` nhưng không cần interaction.
+    """
+    pomo_cog = bot.cogs.get('PomodoroCog')
+    if not pomo_cog or member.id not in getattr(pomo_cog, '_sessions', {}):
+        return False
+
+    sess = pomo_cog._sessions.get(member.id)
+    if not sess:
+        return False
+
+    # Nếu đang work phase thì cộng phần đã học của vòng hiện tại.
+    if sess.phase == 'work':
+        elapsed_work = int((sess.work_minutes * 60) - sess.phase_remaining)
+        if elapsed_work > 60:
+            add_study_time(member.id, member.display_name, elapsed_work)
+
+    # Rời group nếu có để tránh vòng kế tiếp tiếp tục tính cho member đã rời.
+    if sess.group_id and sess.group_id in getattr(pomo_cog, '_groups', {}):
+        grp = pomo_cog._groups[sess.group_id]
+        grp.members.pop(member.id, None)
+        if grp.announce_msg:
+            try:
+                await grp.announce_msg.edit(content=pomo_cog._build_group_embed(grp))
+            except Exception:
+                pass
+        if member.id == grp.host.id and grp.members:
+            grp.host = next(iter(grp.members.values())).member
+        if not grp.members:
+            pomo_cog._cancel_group(sess.group_id)
+
+    pomo_cog._cancel_session(member.id)
+    try:
+        pomo_cog._update_history(member.id, sess)
+    except Exception as e:
+        log.error(f'Pomodoro history sync error ({member.display_name}): {e}')
+
+    await safe_send_dm(
+        member,
+        f'⏹️ **Pomodoro đã dừng tự động** vì bạn {reason}.\n'
+        f'Dùng `/pomodoro start` để bắt đầu lại khi sẵn sàng.'
+    )
+    return True
+
 def bot_can_move(member): return member.guild.me.guild_permissions.move_members
 
 def cancel_task(mid: int):
@@ -1075,7 +1274,10 @@ async def check_media(member: discord.Member):
                 member.voice.channel.id in FOCUS_CHANNEL_IDS): return
         if not is_media_active(member.voice):
             if not bot_can_move(member): return
-            await record_leave_and_notify(member)
+            pomo_cog = bot.cogs.get('PomodoroCog')
+            was_in_pomo = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
+            await _force_stop_pomodoro_if_active(member, reason='bị kick (không bật camera/stream)')
+            await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
             await member.move_to(None)
             await safe_send_dm(member,
                 '🚫 Bị kick vì **không bật Cam 📷 hoặc Stream 📺**.\n'
@@ -1118,6 +1320,7 @@ async def scheduled_tasks():
         yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         report_sent_today.intersection_update({today_key, yesterday_key})
         daily_board_sent.intersection_update({today_key, yesterday_key})
+        save_runtime_state()
         log.info('Reset session counts & daily_first_join.')
 
 @tasks.loop(minutes=CHECKPOINT_MINUTES)
@@ -1137,28 +1340,34 @@ async def checkpoint_task():
             last_checkpoint.pop(mid, None)
             milestone_sent.pop(mid, None)
             media_active_members.discard(mid)
+            save_runtime_state()
             continue
-        if mid in pomo_sessions:
-            continue
-            
+
         was_active = mid in media_active_members
         now_active = bool(member.voice and is_media_active(member.voice))
+        in_pomo    = mid in pomo_sessions
         
-        if was_active:
+        if was_active and not in_pomo:
             elapsed, result = await _do_checkpoint(member)
             if result and result.get('level_up'):
                 await _ensure_role_synced(member, result['new_level'])
+                await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{result["new_level"]} {LEVEL_NAMES[result["new_level"]]}** 🎊')
             await _check_milestones(member)
             await _check_quests_and_badges(member)
+        elif in_pomo and was_active:
+            last_checkpoint[mid] = datetime.now()
         
         if now_active and not was_active:
             media_active_members.add(mid)
             last_checkpoint[mid] = datetime.now()
+            save_runtime_state()
         elif not now_active and was_active:
             media_active_members.discard(mid)
+            save_runtime_state()
             
     await update_all_live_messages()
     _update_live_cache()
+    save_runtime_state()
 
 @scheduled_tasks.before_loop
 async def before_scheduled_tasks():
@@ -1913,6 +2122,8 @@ async def cmd_report(ctx):
 @bot.event
 async def on_ready():
     log.info(f'✅ Bot {bot.user.name} ready!')
+    if not join_times:
+        restore_runtime_state()
 
     if not bot.cogs.get('PomodoroCog'):
         try:
@@ -1976,26 +2187,39 @@ async def on_ready():
                 asyncio.create_task(_ensure_role_synced(m, level))
                 break
 
-    # Recover members already in voice channels on reconnect.
-    # Skip members already tracked in join_times to avoid resetting their session timer.
+    # Reconcile runtime state with current voice members on reconnect/restart.
+    current_focus_members: dict[int, discord.Member] = {}
     for ch_id in FOCUS_CHANNEL_IDS:
         ch = bot.get_channel(ch_id)
         if ch:
             for m in ch.members:
                 if m.bot:
                     continue
-                if m.id in join_times:
-                    # Already tracked — just re-sync media state
-                    if m.voice and is_media_active(m.voice):
-                        media_active_members.add(m.id)
-                    else:
-                        media_active_members.discard(m.id)
-                    continue
-                record_join(m)
-                if m.voice and is_media_active(m.voice):
-                    media_active_members.add(m.id)
-                else:
-                    start_check(m, 'bot restart – no cam/stream')
+                current_focus_members[m.id] = m
+
+    for mid in list(join_times.keys()):
+        m = current_focus_members.get(mid)
+        if not m:
+            join_times.pop(mid, None)
+            last_checkpoint.pop(mid, None)
+            milestone_sent.pop(mid, None)
+            media_active_members.discard(mid)
+            continue
+        if m.voice and is_media_active(m.voice):
+            media_active_members.add(mid)
+        else:
+            media_active_members.discard(mid)
+            start_check(m, 'bot restart – no cam/stream')
+
+    for mid, m in current_focus_members.items():
+        if mid in join_times:
+            continue
+        record_join(m)
+        if not (m.voice and is_media_active(m.voice)):
+            start_check(m, 'bot restart – no cam/stream')
+
+    _update_live_cache()
+    save_runtime_state()
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -2007,6 +2231,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if stayed_in_focus:
         was_active = is_media_active(before)
         now_active = is_media_active(after)
+        pomo_cog = bot.cogs.get('PomodoroCog')
+        in_pomodoro = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
         if not was_active and now_active:
             cancel_task(member.id)
             media_active_members.add(member.id)
@@ -2014,13 +2240,17 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 record_join(member)
             else:
                 last_checkpoint[member.id] = datetime.now()
+                save_runtime_state()
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
         elif was_active and not now_active:
-            elapsed, result = await _do_checkpoint(member)
-            if result and result.get('level_up'):
-                await _ensure_role_synced(member, result['new_level'])
-            await _check_quests_and_badges(member)
+            if not in_pomodoro:
+                elapsed, result = await _do_checkpoint(member)
+                if result and result.get('level_up'):
+                    await _ensure_role_synced(member, result['new_level'])
+                    await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{result["new_level"]} {LEVEL_NAMES[result["new_level"]]}** 🎊')
+                await _check_quests_and_badges(member)
             media_active_members.discard(member.id)
+            save_runtime_state()
             start_check(member, 'tắt Cam/Stream')
             await safe_send_dm(member,
                 f'⚠️ Vừa tắt Cam/Stream!\n'
@@ -2042,7 +2272,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 await update_live_message(server); break
 
     elif left_focus and not stayed_in_focus:
-        duration = await record_leave_and_notify(member)
+        pomo_cog = bot.cogs.get('PomodoroCog')
+        was_in_pomo = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
+        
+        await _force_stop_pomodoro_if_active(member, reason='rời phòng học')
+        duration = await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
         cancel_task(member.id)
         log.info(f'{member.display_name} rời phòng sau {format_time(duration)}')
         for server in SERVERS:
