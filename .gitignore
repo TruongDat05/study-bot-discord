@@ -1,4 +1,12 @@
-.env
+# Dữ liệu học tập và trạng thái tạm thời (Không đưa lên GitHub)
 study_data.json
-*.log
+runtime_state.json
+bot.log
+backups/
+
+# Cấu hình bảo mật
 .env
+
+# Các file rác của Python
+__pycache__/
+*.pyc
