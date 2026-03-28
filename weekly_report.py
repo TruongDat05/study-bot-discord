@@ -234,6 +234,7 @@ def create_weekly_report_cog(
     save_data_fn,
     all_badges: dict,
     safe_send_dm_fn,
+    update_data_fn=None,
 ):
     class WeeklyReportCog(discord.ext.commands.Cog, name='WeeklyReport'):
 
@@ -253,15 +254,28 @@ def create_weekly_report_cog(
             uid  = str(interaction.user.id)
             data = load_data_fn()
             if uid not in data:
-                data[uid] = {
-                    'name': interaction.user.display_name,
-                    'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
-                    'streak': 0, 'longest_streak': 0, 'last_study_date': '',
-                    'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
-                    'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
-                    'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
-                }
-                save_data_fn(data)
+                if update_data_fn is not None:
+                    def ensure_user(current: dict):
+                        current.setdefault(uid, {
+                            'name': interaction.user.display_name,
+                            'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                            'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                            'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                            'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                            'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+                        })
+
+                    _, data = update_data_fn(ensure_user)
+                else:
+                    data[uid] = {
+                        'name': interaction.user.display_name,
+                        'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                        'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                        'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                        'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                        'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+                    }
+                    save_data_fn(data)
             msg = _build_weekly_dm(
                 data[uid].get('name', interaction.user.display_name),
                 data[uid], _week_dates(0), _week_dates(-1), all_badges,
@@ -278,11 +292,18 @@ def create_weekly_report_cog(
         @weekly_group.command(name='off', description='Tắt nhận báo cáo tuần qua DM')
         async def weekly_off(self, interaction: discord.Interaction):
             uid  = str(interaction.user.id)
-            data = load_data_fn()
-            if uid not in data:
+            if uid not in load_data_fn():
                 await interaction.response.send_message('❌ Chưa có dữ liệu!', ephemeral=True); return
-            data[uid][WEEKLY_OPT_OUT_KEY] = True
-            save_data_fn(data)
+            if update_data_fn is not None:
+                def opt_out(current: dict):
+                    if uid in current:
+                        current[uid][WEEKLY_OPT_OUT_KEY] = True
+
+                update_data_fn(opt_out)
+            else:
+                data = load_data_fn()
+                data[uid][WEEKLY_OPT_OUT_KEY] = True
+                save_data_fn(data)
             await interaction.response.send_message(
                 '✅ Đã tắt báo cáo tuần.\n_`/weekly on` để bật lại._', ephemeral=True
             )
@@ -293,11 +314,18 @@ def create_weekly_report_cog(
         @weekly_group.command(name='on', description='Bật lại nhận báo cáo tuần tự động')
         async def weekly_on(self, interaction: discord.Interaction):
             uid  = str(interaction.user.id)
-            data = load_data_fn()
-            if uid not in data:
+            if uid not in load_data_fn():
                 await interaction.response.send_message('❌ Chưa có dữ liệu!', ephemeral=True); return
-            data[uid].pop(WEEKLY_OPT_OUT_KEY, None)
-            save_data_fn(data)
+            if update_data_fn is not None:
+                def opt_in(current: dict):
+                    if uid in current:
+                        current[uid].pop(WEEKLY_OPT_OUT_KEY, None)
+
+                update_data_fn(opt_in)
+            else:
+                data = load_data_fn()
+                data[uid].pop(WEEKLY_OPT_OUT_KEY, None)
+                save_data_fn(data)
             await interaction.response.send_message(
                 f'✅ Đã bật báo cáo tuần!\n'
                 f'Bot DM bạn mỗi **Chủ nhật {WEEKLY_SEND_HOUR:02d}:{WEEKLY_SEND_MINUTE:02d}**.',
@@ -460,15 +488,29 @@ def create_weekly_report_cog(
             elif action == 'off':
                 if uid not in data:
                     await ctx.send('❌ Chưa có dữ liệu!'); return
-                data[uid][WEEKLY_OPT_OUT_KEY] = True
-                save_data_fn(data)
+                if update_data_fn is not None:
+                    def opt_out(current: dict):
+                        if uid in current:
+                            current[uid][WEEKLY_OPT_OUT_KEY] = True
+
+                    update_data_fn(opt_out)
+                else:
+                    data[uid][WEEKLY_OPT_OUT_KEY] = True
+                    save_data_fn(data)
                 await ctx.send('✅ Đã tắt báo cáo tuần.')
 
             elif action == 'on':
                 if uid not in data:
                     await ctx.send('❌ Chưa có dữ liệu!'); return
-                data[uid].pop(WEEKLY_OPT_OUT_KEY, None)
-                save_data_fn(data)
+                if update_data_fn is not None:
+                    def opt_in(current: dict):
+                        if uid in current:
+                            current[uid].pop(WEEKLY_OPT_OUT_KEY, None)
+
+                    update_data_fn(opt_in)
+                else:
+                    data[uid].pop(WEEKLY_OPT_OUT_KEY, None)
+                    save_data_fn(data)
                 await ctx.send('✅ Đã bật lại báo cáo tuần!')
 
             elif action == 'send' and ctx.author.guild_permissions.administrator:
@@ -519,29 +561,33 @@ def create_weekly_report_cog(
                 targets = list(member_map.items())
 
             for uid, member in targets:
-                info = data.get(uid)
-                if not info:
-                    skipped += 1; continue
+                try:
+                    info = data.get(uid)
+                    if not info:
+                        skipped += 1; continue
 
-                if info.get(WEEKLY_OPT_OUT_KEY, False):
+                    if info.get(WEEKLY_OPT_OUT_KEY, False):
+                        skipped += 1
+                        log.info(f'[WeeklyReport] skip {member.display_name} (opt-out)')
+                        continue
+
+                    this_total = _week_total(info, this_week)
+                    last_total = _week_total(info, last_week)
+                    if this_total == 0 and last_total == 0:
+                        skipped += 1; continue
+
+                    msg = _build_weekly_dm(
+                        info.get('name', member.display_name),
+                        info, this_week, last_week, all_badges,
+                    )
+                    if len(msg) > 1950:
+                        msg = msg[:1950] + '\n_...(rút gọn)_'
+                    await safe_send_dm_fn(member, msg)
+                    sent += 1
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    log.error(f'[WeeklyReport] Error sending to {member.display_name}: {e}', exc_info=True)
                     skipped += 1
-                    log.info(f'[WeeklyReport] skip {member.display_name} (opt-out)')
-                    continue
-
-                this_total = _week_total(info, this_week)
-                last_total = _week_total(info, last_week)
-                if this_total == 0 and last_total == 0:
-                    skipped += 1; continue
-
-                msg = _build_weekly_dm(
-                    info.get('name', member.display_name),
-                    info, this_week, last_week, all_badges,
-                )
-                if len(msg) > 1950:
-                    msg = msg[:1950] + '\n_...(rút gọn)_'
-                await safe_send_dm_fn(member, msg)
-                sent += 1
-                await asyncio.sleep(0.5)
 
             log.info(f'[WeeklyReport] Gửi: {sent} DM, bỏ qua: {skipped}')
             return sent, skipped
@@ -581,10 +627,13 @@ async def setup_weekly_report(
     save_data_fn,
     all_badges: dict,
     safe_send_dm_fn,
+    update_data_fn=None,
 ):
     if bot.cogs.get('WeeklyReport'):
         return
-    cog = create_weekly_report_cog(bot, load_data_fn, save_data_fn, all_badges, safe_send_dm_fn)
+    cog = create_weekly_report_cog(
+        bot, load_data_fn, save_data_fn, all_badges, safe_send_dm_fn, update_data_fn=update_data_fn
+    )
     await bot.add_cog(cog)
     # Ghi chú: bot.add_cog tự động đăng ký weekly_group vào bot.tree
     # KHÔNG gọi bot.tree.add_command(cog.weekly_group) — sẽ gây CommandAlreadyRegistered

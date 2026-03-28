@@ -171,6 +171,8 @@ class PomodoroCog(commands.Cog):
         load_data_fn:     Callable = None,   # [v2] hàm load_data từ bot.py
         save_data_fn:     Callable = None,   # [v2] hàm save_data từ bot.py
         add_xp_fn:        Callable = None,   # [v2] hàm add_xp_direct từ bot.py
+        update_data_fn:   Callable = None,   # [v3] cập nhật data atomically
+        progress_sync_fn: Callable = None,   # [v3] đồng bộ role/quest/level sau khi cộng tiến độ
     ):
         self.bot        = bot
         self._add_study = add_study_time_fn
@@ -181,6 +183,8 @@ class PomodoroCog(commands.Cog):
         self._load    = load_data_fn  if load_data_fn is not None else lambda: {}
         self._save    = save_data_fn  if save_data_fn is not None else lambda _: None
         self._add_xp  = add_xp_fn    if add_xp_fn    is not None else lambda uid, xp: None
+        self._update  = update_data_fn if update_data_fn is not None else None
+        self._sync_progress = progress_sync_fn
 
         # state: member_id → PomodoroSession (phiên cá nhân hoặc đã join nhóm)
         self._sessions: dict[int, PomodoroSession] = {}
@@ -311,6 +315,8 @@ class PomodoroCog(commands.Cog):
             )
             return
 
+        previous_level = self._load().get(str(member.id), {}).get('level', 0)
+
         # Nếu đang trong phase work, lưu thời gian đã học
         if sess.phase == 'work':
             elapsed_work = int(
@@ -330,9 +336,15 @@ class PomodoroCog(commands.Cog):
                     )
                 except Exception:
                     pass
+            if member.id == grp.host.id and grp.members:
+                grp.host = next(iter(grp.members.values())).member
+            if not grp.members:
+                self._cancel_group(sess.group_id)
 
         self._cancel_session(member.id)
         summary = self._update_history(member.id, sess)
+        if self._sync_progress is not None:
+            await self._sync_progress(member, previous_level)
 
         await interaction.response.send_message(
             f'⏹️ Đã dừng Pomodoro.\n'
@@ -508,7 +520,15 @@ class PomodoroCog(commands.Cog):
             return
 
         grp = self._groups.get(sess.group_id)
+        previous_level = self._load().get(str(member.id), {}).get('level', 0)
+
+        if sess.phase == 'work':
+            elapsed_work = int((sess.work_minutes * 60) - sess.phase_remaining)
+            if elapsed_work > 60:
+                self._add_study(member.id, member.display_name, elapsed_work)
+
         self._cancel_session(member.id)
+        self._update_history(member.id, sess)
 
         if grp:
             grp.members.pop(member.id, None)
@@ -525,6 +545,9 @@ class PomodoroCog(commands.Cog):
             # Nếu phòng trống, xoá luôn
             if not grp.members:
                 self._cancel_group(sess.group_id)
+
+        if self._sync_progress is not None:
+            await self._sync_progress(member, previous_level)
 
         await interaction.response.send_message(
             f'👋 Đã rời phòng nhóm.',
@@ -618,26 +641,40 @@ class PomodoroCog(commands.Cog):
         rounds: app_commands.Range[int, 1, 12] = POMODORO_DEFAULTS['rounds'],
     ):
         uid  = str(interaction.user.id)
-        data = self._load()
 
-        if uid not in data:
-            data[uid] = {
-                'name': interaction.user.display_name,
-                'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
-                'streak': 0, 'longest_streak': 0, 'last_study_date': '',
-                'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
-                'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
-                'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
-            }
-            self._save(data)
-
-        # Lưu preset vào file
-        data[uid]['pomo_preset'] = {
-            'work':   work,
-            'break':  break_,
+        preset = {
+            'work': work,
+            'break': break_,
             'rounds': rounds,
         }
-        self._save(data)
+
+        if self._update is not None:
+            def mutator(data: dict):
+                if uid not in data:
+                    data[uid] = {
+                        'name': interaction.user.display_name,
+                        'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                        'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                        'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                        'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                        'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+                    }
+                data[uid]['pomo_preset'] = preset
+
+            self._update(mutator)
+        else:
+            data = self._load()
+            if uid not in data:
+                data[uid] = {
+                    'name': interaction.user.display_name,
+                    'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                    'streak': 0, 'longest_streak': 0, 'last_study_date': '',
+                    'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                    'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
+                    'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
+                }
+            data[uid]['pomo_preset'] = preset
+            self._save(data)
 
         await interaction.response.send_message(
             f'✅ Đã lưu preset Pomodoro yêu thích!\n'
@@ -684,6 +721,8 @@ class PomodoroCog(commands.Cog):
                 finally:
                     edit_task.cancel()
 
+                previous_level = self._load().get(str(sess.member.id), {}).get('level', 0)
+
                 # Lưu thời gian học vào data file
                 self._add_study(
                     sess.member.id,
@@ -695,6 +734,9 @@ class PomodoroCog(commands.Cog):
                 self._award_pomodoro_xp(str(sess.member.id))
 
                 sess.completed_rounds += 1
+
+                if self._sync_progress is not None:
+                    await self._sync_progress(sess.member, previous_level)
 
                 # Kiểm tra xong chưa
                 if sess.completed_rounds >= sess.total_rounds:
@@ -819,6 +861,7 @@ class PomodoroCog(commands.Cog):
 
                 # Lưu thời gian học và cộng XP cho từng thành viên
                 for sess in list(grp.members.values()):
+                    previous_level = self._load().get(str(sess.member.id), {}).get('level', 0)
                     self._add_study(
                         sess.member.id,
                         sess.member.display_name,
@@ -827,6 +870,8 @@ class PomodoroCog(commands.Cog):
                     # [v2] Cộng XP thực sự cho mỗi thành viên mỗi vòng
                     self._award_pomodoro_xp(str(sess.member.id))
                     sess.completed_rounds += 1
+                    if self._sync_progress is not None:
+                        await self._sync_progress(sess.member, previous_level)
 
                 grp.current_round += 1
 
@@ -1039,7 +1084,7 @@ class PomodoroCog(commands.Cog):
             self._add_xp(uid, XP_PER_ROUND)
             log.info(f'[Pomodoro] +{XP_PER_ROUND} XP → uid {uid}')
         except Exception as e:
-            log.error(f'[Pomodoro] _award_pomodoro_xp error: {e}')
+            log.error(f'[Pomodoro] _award_pomodoro_xp error: {e}', exc_info=True)
 
     def _update_history(
         self,
@@ -1055,17 +1100,22 @@ class PomodoroCog(commands.Cog):
         LƯU Ý v2: _award_pomodoro_xp đã được gọi riêng sau mỗi vòng,
         nên _update_history chỉ cập nhật lịch sử (total_rounds, total_minutes)
         và KHÔNG gọi _add_xp thêm lần nữa để tránh nhân đôi.
+        
+        FIX: Always reload data at start to avoid race conditions with external saves.
         """
-        today       = datetime.now().strftime('%Y-%m-%d')
-        h           = self._history.setdefault(member_id, {
-            'total_rounds':   0,
-            'total_minutes':  0,
-            'total_xp':       0,
-            'best_streak':    0,
-            'today_rounds':   0,
-            'today_date':     today,
-            'current_streak': 0,
-        })
+        today = datetime.now().strftime('%Y-%m-%d')
+        if member_id not in self._history:
+            file_h = self._load().get(str(member_id), {}).get('pomo_history', {})
+            self._history[member_id] = {
+                'total_rounds': file_h.get('total_rounds', 0),
+                'total_minutes': file_h.get('total_minutes', 0),
+                'total_xp': file_h.get('total_xp', 0),
+                'best_streak': file_h.get('best_streak', 0),
+                'today_rounds': file_h.get('today_rounds', 0),
+                'today_date': file_h.get('today_date', today),
+                'current_streak': file_h.get('current_streak', 0),
+            }
+        h = self._history[member_id]
 
         if h.get('today_date') != today:
             h['today_rounds'] = 0
@@ -1082,24 +1132,30 @@ class PomodoroCog(commands.Cog):
         h['current_streak'] += rounds_done
         h['best_streak']     = max(h['best_streak'], h['current_streak'])
 
-        # [v2] Lưu vào file data (persistent)
         try:
             uid  = str(member_id)
-            data = self._load()
-            if uid in data:
-                # Sync lịch sử từ memory vào file
-                data[uid]['pomo_history'] = {
-                    'total_rounds':   h['total_rounds'],
-                    'total_minutes':  h['total_minutes'],
-                    'total_xp':       h['total_xp'],
-                    'best_streak':    h['best_streak'],
-                    'today_rounds':   h['today_rounds'],
-                    'today_date':     h['today_date'],
-                    'current_streak': h['current_streak'],
-                }
-                self._save(data)
+            history_payload = {
+                'total_rounds': h['total_rounds'],
+                'total_minutes': h['total_minutes'],
+                'total_xp': h['total_xp'],
+                'best_streak': h['best_streak'],
+                'today_rounds': h['today_rounds'],
+                'today_date': h['today_date'],
+                'current_streak': h['current_streak'],
+            }
+            if self._update is not None:
+                def mutator(data: dict):
+                    if uid in data:
+                        data[uid]['pomo_history'] = history_payload
+
+                self._update(mutator)
+            else:
+                data = self._load()
+                if uid in data:
+                    data[uid]['pomo_history'] = history_payload
+                    self._save(data)
         except Exception as e:
-            log.error(f'[Pomodoro] _update_history save error: {e}')
+            log.error(f'[Pomodoro] _update_history save error: {e}', exc_info=True)
 
         return {
             'xp_bonus':      xp_bonus,
@@ -1164,6 +1220,8 @@ def create_pomodoro_cog(
     load_data_fn=None,   # [v2] hàm load_data từ bot.py
     save_data_fn=None,   # [v2] hàm save_data từ bot.py
     add_xp_fn=None,      # [v2] hàm add_xp_direct từ bot.py
+    update_data_fn=None, # [v3] hàm update_data từ bot.py
+    progress_sync_fn=None, # [v3] hàm sync progress từ bot.py
 ):
     """
     Hàm tiện ích tạo và trả về PomodoroCog đã được cấu hình.
@@ -1193,4 +1251,6 @@ def create_pomodoro_cog(
         load_data_fn=load_data_fn,
         save_data_fn=save_data_fn,
         add_xp_fn=add_xp_fn,
+        update_data_fn=update_data_fn,
+        progress_sync_fn=progress_sync_fn,
     )

@@ -11,6 +11,7 @@ import random
 import threading
 import io
 import shutil
+from copy import deepcopy
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
@@ -219,7 +220,7 @@ remind_tasks:         dict[int, tuple]        = {}
 media_active_members: set                     = set()
 _dashboard_started:   bool                    = False
 
-_data_lock = threading.Lock()
+_data_lock = threading.RLock()
 _runtime_lock = threading.Lock()
 
 # ─── MEDIA HELPERS ───────────────────────────────────────────────────────────
@@ -235,25 +236,42 @@ def media_status_icon(vs: discord.VoiceState) -> str:
 
 # ─── DATA HELPERS ────────────────────────────────────────────────────────────
 
+def _load_data_unlocked() -> dict:
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        log.error(f'Lỗi đọc data: {e}', exc_info=True)
+    except Exception as e:
+        log.error(f'Lỗi không xác định khi đọc data: {e}', exc_info=True)
+    return {}
+
 def load_data() -> dict:
     with _data_lock:
-        try:
-            if os.path.exists(DATA_FILE):
-                with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            log.error(f'Lỗi đọc data: {e}')
-        return {}
+        return _load_data_unlocked()
+
+def _save_data_unlocked(data: dict):
+    try:
+        tmp = DATA_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_FILE)
+    except IOError as e:
+        log.error(f'Lỗi lưu data: {e}', exc_info=True)
+    except Exception as e:
+        log.error(f'Lỗi không xác định khi lưu data: {e}', exc_info=True)
 
 def save_data(data: dict):
     with _data_lock:
-        try:
-            tmp = DATA_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, DATA_FILE)
-        except IOError as e:
-            log.error(f'Lỗi lưu data: {e}')
+        _save_data_unlocked(data)
+
+def update_data(mutator):
+    with _data_lock:
+        data = _load_data_unlocked()
+        result = mutator(data)
+        _save_data_unlocked(data)
+        return result, deepcopy(data)
 
 def _serialize_dt(dt: datetime) -> str:
     return dt.isoformat()
@@ -488,164 +506,235 @@ def get_report_channel_for(member: discord.Member):
             return ch
     return None
 
-def add_study_time(member_id: int, member_name: str, seconds: int) -> dict:
+def _split_seconds_by_day(start_time: datetime, end_time: datetime) -> list[tuple[str, int]]:
+    if end_time <= start_time:
+        return []
+    parts: list[tuple[str, int]] = []
+    cursor = start_time
+    while cursor < end_time:
+        next_day = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        segment_end = min(end_time, next_day)
+        segment_seconds = int((segment_end - cursor).total_seconds())
+        if segment_seconds > 0:
+            parts.append((cursor.strftime('%Y-%m-%d'), segment_seconds))
+        cursor = segment_end
+    return parts
+
+def add_study_time(
+    member_id: int,
+    member_name: str,
+    seconds: int,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> dict:
     if seconds <= 0:
         return {}
-    data  = load_data()
-    today = datetime.now().strftime('%Y-%m-%d')
+    end_time = end_time or datetime.now()
+    start_time = start_time or (end_time - timedelta(seconds=seconds))
+    if end_time <= start_time:
+        return {}
+    day_parts = _split_seconds_by_day(start_time, end_time)
+    if not day_parts:
+        return {}
     uid   = str(member_id)
-    if uid not in data:
-        data[uid] = _default_user(member_name)
-    data[uid]['name'] = member_name
-    data[uid]['daily'][today] = data[uid]['daily'].get(today, 0) + seconds
-    data[uid]['total']        = data[uid].get('total', 0) + seconds
-    xp_acc    = data[uid].get('xp_acc_secs', 0) + seconds
-    xp_gained = (xp_acc // 60) * XP_PER_MINUTE
-    data[uid]['xp_acc_secs'] = xp_acc % 60
-    old_xp    = data[uid].get('xp', 0)
-    old_level = get_level(old_xp)
-    streak, is_new_day = _update_streak(data, uid, today)
-    if is_new_day and streak > 1:
-        xp_gained += streak * 5
-    data[uid]['xp']    = old_xp + xp_gained
-    new_level          = get_level(data[uid]['xp'])
-    data[uid]['level'] = new_level
-    save_data(data)
-    return {
-        'xp_gained':     xp_gained,
-        'level_up':      new_level > old_level,
-        'new_level':     new_level,
-        'streak':        streak,
-        'total_xp':      data[uid]['xp'],
-        'goal':          data[uid].get('goal'),
-        'goal_seconds':  data[uid].get('goal_seconds', 0),
-        'today_seconds': data[uid]['daily'].get(today, 0),
-    }
+
+    def mutator(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(member_name)
+        data[uid]['name'] = member_name
+        old_xp = data[uid].get('xp', 0)
+        old_level = get_level(old_xp)
+        total_xp_gained = 0
+        streak = data[uid].get('streak', 0)
+        for day_key, day_seconds in day_parts:
+            data[uid]['daily'][day_key] = data[uid]['daily'].get(day_key, 0) + day_seconds
+            data[uid]['total'] = data[uid].get('total', 0) + day_seconds
+            xp_acc = data[uid].get('xp_acc_secs', 0) + day_seconds
+            xp_gained = (xp_acc // 60) * XP_PER_MINUTE
+            data[uid]['xp_acc_secs'] = xp_acc % 60
+            streak, is_new_day = _update_streak(data, uid, day_key)
+            if is_new_day and streak > 1:
+                xp_gained += streak * 5
+            total_xp_gained += xp_gained
+            data[uid]['xp'] = data[uid].get('xp', 0) + xp_gained
+        today = end_time.strftime('%Y-%m-%d')
+        new_level = get_level(data[uid]['xp'])
+        data[uid]['level'] = new_level
+        return {
+            'xp_gained': total_xp_gained,
+            'level_up': new_level > old_level,
+            'new_level': new_level,
+            'streak': streak,
+            'total_xp': data[uid]['xp'],
+            'goal': data[uid].get('goal'),
+            'goal_seconds': data[uid].get('goal_seconds', 0),
+            'today_seconds': data[uid]['daily'].get(today, 0),
+        }
+
+    result, _ = update_data(mutator)
+    return result
 
 def add_xp_direct(uid: str, xp_amount: int):
-    data = load_data()
-    if uid not in data:
-        return
-    data[uid]['xp']    = data[uid].get('xp', 0) + xp_amount
-    data[uid]['level'] = get_level(data[uid]['xp'])
-    save_data(data)
+    def mutator(data: dict):
+        if uid not in data:
+            return
+        data[uid]['xp'] = data[uid].get('xp', 0) + xp_amount
+        data[uid]['level'] = get_level(data[uid]['xp'])
+
+    update_data(mutator)
 
 # ─── QUEST SYSTEM ────────────────────────────────────────────────────────────
 
 def generate_daily_quests(uid: str, today: str, member_name: str = '') -> list[dict]:
-    data = load_data()
-    if uid not in data:
-        data[uid] = _default_user(member_name or f'User {uid}')
-        save_data(data)
-    existing = data[uid].get('daily_quests', {}).get(today)
-    if existing:
-        return existing
-    streak = data[uid].get('streak', 0)
-    pool   = [q for q in QUEST_POOL if not (q['type'] == 'streak' and streak >= q['target'])]
-    chosen = random.sample(pool, min(QUEST_DAILY_COUNT, len(pool)))
-    quests = [{'id': q['id'], 'progress': 0, 'done': False, 'notified': False} for q in chosen]
-    data[uid].setdefault('daily_quests', {})[today] = quests
-    save_data(data)
+    def mutator(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(member_name or f'User {uid}')
+        existing = data[uid].get('daily_quests', {}).get(today)
+        if existing:
+            return existing
+        streak = data[uid].get('streak', 0)
+        pool = [q for q in QUEST_POOL if not (q['type'] == 'streak' and streak >= q['target'])]
+        chosen = random.sample(pool, min(QUEST_DAILY_COUNT, len(pool)))
+        quests = [{'id': q['id'], 'progress': 0, 'done': False, 'notified': False} for q in chosen]
+        data[uid].setdefault('daily_quests', {})[today] = quests
+        return quests
+
+    quests, _ = update_data(mutator)
     return quests
 
 def get_quest_info(quest_id: str) -> dict | None:
     return next((q for q in QUEST_POOL if q['id'] == quest_id), None)
 
 def update_quest_progress(uid: str, today: str, override_today_secs: int = None, member_name: str = '') -> list[str]:
-    data = load_data()
-    if uid not in data:
-        data[uid] = _default_user(member_name or f'User {uid}')
-        save_data(data)
-    quests     = data[uid].get('daily_quests', {}).get(today, [])
-    today_secs = override_today_secs if override_today_secs is not None else data[uid]['daily'].get(today, 0)
-    streak     = data[uid].get('streak', 0)
-    now_hour   = datetime.now().hour
-    try:
-        sessions = session_counts.get(int(uid), 0)
-    except (ValueError, TypeError):
-        sessions = 0
-    just_done = []
-    for q in quests:
-        if q.get('done'):
-            continue
-        info   = get_quest_info(q['id'])
-        if not info:
-            continue
-        t, target = info['type'], info['target']
-        if   t == 'minutes':    q['progress'] = min(target, today_secs // 60)
-        elif t == 'streak':     q['progress'] = min(target, streak)
-        elif t == 'hour_before':
-            if now_hour < target: q['progress'] = target
-        elif t == 'hour_after':
-            if now_hour >= target: q['progress'] = target
-        elif t == 'first_in':
-            first_id = daily_first_join.get(today)
-            if first_id and str(first_id) == uid: q['progress'] = target
-        elif t == 'sessions':   q['progress'] = min(target, sessions)
+    def mutator(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(member_name or f'User {uid}')
+        quests = data[uid].get('daily_quests', {}).get(today, [])
+        today_secs = override_today_secs if override_today_secs is not None else data[uid]['daily'].get(today, 0)
+        streak = data[uid].get('streak', 0)
+        now_hour = datetime.now().hour
+        try:
+            sessions = session_counts.get(int(uid), 0)
+        except (ValueError, TypeError):
+            sessions = 0
+        just_done = []
+        for q in quests:
+            if q.get('done'):
+                continue
+            info = get_quest_info(q['id'])
+            if not info:
+                continue
+            t, target = info['type'], info['target']
+            if t == 'minutes':
+                q['progress'] = min(target, today_secs // 60)
+            elif t == 'streak':
+                q['progress'] = min(target, streak)
+            elif t == 'hour_before':
+                if now_hour < target:
+                    q['progress'] = target
+            elif t == 'hour_after':
+                if now_hour >= target:
+                    q['progress'] = target
+            elif t == 'first_in':
+                first_id = daily_first_join.get(today)
+                if first_id and str(first_id) == uid:
+                    q['progress'] = target
+            elif t == 'sessions':
+                q['progress'] = min(target, sessions)
 
-        if q['progress'] >= target and not q.get('done'):
-            q['done']     = True
-            q['notified'] = False
-            just_done.append(q['id'])
-            data[uid]['quests_done_total'] = data[uid].get('quests_done_total', 0) + 1
-            xp_bonus = info.get('xp', 0)
-            data[uid]['xp']    = data[uid].get('xp', 0) + xp_bonus
-            data[uid]['level'] = get_level(data[uid]['xp'])
-            log.info(f'Quest done [{q["id"]}] → +{xp_bonus} XP cho {data[uid]["name"]}')
-    data[uid]['daily_quests'][today] = quests
-    save_data(data)
+            if q['progress'] >= target and not q.get('done'):
+                q['done'] = True
+                q['notified'] = False
+                just_done.append(q['id'])
+                data[uid]['quests_done_total'] = data[uid].get('quests_done_total', 0) + 1
+                xp_bonus = info.get('xp', 0)
+                data[uid]['xp'] = data[uid].get('xp', 0) + xp_bonus
+                data[uid]['level'] = get_level(data[uid]['xp'])
+                log.info(f'Quest done [{q["id"]}] → +{xp_bonus} XP cho {data[uid]["name"]}')
+        data[uid].setdefault('daily_quests', {})[today] = quests
+        return just_done
+
+    just_done, _ = update_data(mutator)
     return just_done
+
+def claim_completed_quest_notifications(uid: str, today: str) -> list[dict]:
+    def mutator(data: dict):
+        if uid not in data:
+            return []
+        quests = data[uid].get('daily_quests', {}).get(today, [])
+        claimed: list[dict] = []
+        for q in quests:
+            if q.get('done') and not q.get('notified', False):
+                info = get_quest_info(q['id'])
+                if info:
+                    claimed.append(info)
+                q['notified'] = True
+        if claimed:
+            data[uid].setdefault('daily_quests', {})[today] = quests
+        return claimed
+
+    claimed, _ = update_data(mutator)
+    return claimed
 
 # ─── BADGE SYSTEM ────────────────────────────────────────────────────────────
 
 def check_and_award_badges(uid: str, member: discord.Member = None) -> list[str]:
-    data = load_data()
-    if uid not in data:
-        return []
-    info          = data[uid]
-    earned        = set(info.get('badges', []))
-    total_hours   = info.get('total', 0) / 3600
-    xp            = info.get('xp', 0)
-    level         = info.get('level', 0)
-    streak        = info.get('streak', 0)
-    quests_done   = info.get('quests_done_total', 0)
-    special_flags = info.get('special_flags', [])
-    today         = datetime.now().strftime('%Y-%m-%d')
-    today_secs    = info['daily'].get(today, 0)
-    new_badges    = []
-    for bid, bdef in BADGES.items():
-        if bid in earned:
-            continue
-        ctype, cval = bdef['condition']
-        awarded = False
-        if   ctype == 'streak'      and streak >= cval:            awarded = True
-        elif ctype == 'total_hours' and total_hours >= cval:       awarded = True
-        elif ctype == 'daily_hours' and today_secs >= cval * 3600: awarded = True
-        elif ctype == 'level'       and level >= cval:             awarded = True
-        elif ctype == 'xp'          and xp >= cval:                awarded = True
-        elif ctype == 'quests_done' and quests_done >= cval:       awarded = True
-        elif ctype == 'special'     and cval in special_flags:     awarded = True
-        if awarded:
-            new_badges.append(bid)
-            earned.add(bid)
-    if new_badges:
-        data[uid]['badges'] = list(earned)
-        badge_dates = data[uid].setdefault('badge_dates', {})
-        for bid in new_badges:
-            if bid not in badge_dates:
-                badge_dates[bid] = today
-        save_data(data)
+    def mutator(data: dict):
+        if uid not in data:
+            return []
+        info = data[uid]
+        earned = set(info.get('badges', []))
+        total_hours = info.get('total', 0) / 3600
+        xp = info.get('xp', 0)
+        level = info.get('level', 0)
+        streak = info.get('streak', 0)
+        quests_done = info.get('quests_done_total', 0)
+        special_flags = info.get('special_flags', [])
+        today = datetime.now().strftime('%Y-%m-%d')
+        today_secs = info['daily'].get(today, 0)
+        new_badges = []
+        for bid, bdef in BADGES.items():
+            if bid in earned:
+                continue
+            ctype, cval = bdef['condition']
+            awarded = False
+            if ctype == 'streak' and streak >= cval:
+                awarded = True
+            elif ctype == 'total_hours' and total_hours >= cval:
+                awarded = True
+            elif ctype == 'daily_hours' and today_secs >= cval * 3600:
+                awarded = True
+            elif ctype == 'level' and level >= cval:
+                awarded = True
+            elif ctype == 'xp' and xp >= cval:
+                awarded = True
+            elif ctype == 'quests_done' and quests_done >= cval:
+                awarded = True
+            elif ctype == 'special' and cval in special_flags:
+                awarded = True
+            if awarded:
+                new_badges.append(bid)
+                earned.add(bid)
+        if new_badges:
+            data[uid]['badges'] = list(earned)
+            badge_dates = data[uid].setdefault('badge_dates', {})
+            for bid in new_badges:
+                badge_dates.setdefault(bid, today)
+        return new_badges
+
+    new_badges, _ = update_data(mutator)
     return new_badges
 
 def award_special_flag(uid: str, flag: str):
-    data = load_data()
-    if uid not in data:
-        return
-    flags = data[uid].get('special_flags', [])
-    if flag not in flags:
-        flags.append(flag)
-        data[uid]['special_flags'] = flags
-        save_data(data)
+    def mutator(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(f'User {uid}')
+        flags = data[uid].get('special_flags', [])
+        if flag not in flags:
+            flags.append(flag)
+            data[uid]['special_flags'] = flags
+
+    update_data(mutator)
 
 def format_badges(badge_ids: list) -> str:
     if not badge_ids:
@@ -684,9 +773,7 @@ def generate_profile_card(member_id: int) -> bytes | None:
     badges  = info.get('badges', [])
     today   = datetime.now().strftime('%Y-%m-%d')
     today_secs = info['daily'].get(today, 0)
-    if member_id in join_times and member_id in media_active_members:
-        chk = last_checkpoint.get(member_id, join_times[member_id])
-        today_secs += int((datetime.now() - chk).total_seconds())
+    today_secs += _get_unsaved_study_seconds(member_id)
 
     BG = (15, 23, 42); CARD = (30, 41, 59); ACCENT = (99, 102, 241)
     ACCENT2 = (139, 92, 246); GOLD = (251, 191, 36); GREEN = (34, 197, 94)
@@ -839,6 +926,34 @@ def record_join(member: discord.Member):
     save_runtime_state()
     log.info(f'{member.display_name} bắt đầu học lúc {now.strftime("%H:%M:%S")}')
 
+def _rebuild_daily_session_state(now: datetime):
+    today = now.strftime('%Y-%m-%d')
+    current_focus_members: list[tuple[datetime, int]] = []
+    for mid, joined_at in join_times.items():
+        current_focus_members.append((joined_at, mid))
+        session_counts[mid] = max(1, session_counts.get(mid, 0))
+    current_focus_members.sort(key=lambda item: item[0])
+    if current_focus_members:
+        daily_first_join[today] = current_focus_members[0][1]
+
+def _get_pomodoro_session(member_id: int):
+    pomo_cog = bot.cogs.get('PomodoroCog')
+    if not pomo_cog:
+        return None
+    return getattr(pomo_cog, '_sessions', {}).get(member_id)
+
+def _get_unsaved_study_seconds(member_id: int, now: datetime | None = None) -> int:
+    now = now or datetime.now()
+    sess = _get_pomodoro_session(member_id)
+    if sess:
+        if sess.phase == 'work' and sess.phase_end > now:
+            return max(0, int(sess.work_minutes * 60 - sess.phase_remaining))
+        return 0
+    if member_id in join_times and member_id in media_active_members:
+        checkpoint = last_checkpoint.get(member_id, join_times[member_id])
+        return max(0, int((now - checkpoint).total_seconds()))
+    return 0
+
 async def _do_checkpoint(member: discord.Member) -> tuple[int, dict]:
     if member.id not in join_times: return 0, {}
     now        = datetime.now()
@@ -846,7 +961,7 @@ async def _do_checkpoint(member: discord.Member) -> tuple[int, dict]:
     elapsed    = int((now - checkpoint).total_seconds())
     result: dict = {}
     if elapsed > 0:
-        result = add_study_time(member.id, member.display_name, elapsed)
+        result = add_study_time(member.id, member.display_name, elapsed, start_time=checkpoint, end_time=now)
         last_checkpoint[member.id] = now
         save_runtime_state()
         log.info(f'[Checkpoint] {member.display_name}: +{format_time(elapsed)}')
@@ -869,31 +984,12 @@ async def _check_quests_and_badges(member: discord.Member):
     generate_daily_quests(uid, today)
     data       = load_data()
     saved_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
-    
-    if member.id in join_times and member.id in media_active_members:
-        chk       = last_checkpoint.get(member.id, join_times[member.id])
-        real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
-    else:
-        real_secs = saved_secs
+    real_secs = saved_secs + _get_unsaved_study_seconds(member.id)
         
     update_quest_progress(uid, today, override_today_secs=real_secs)
     data_fresh = load_data()
-    quests     = data_fresh.get(uid, {}).get('daily_quests', {}).get(today, [])
     new_level  = data_fresh.get(uid, {}).get('level', 0)
-    
-    notify_changed = False
-    msgs_to_send = []
-    for q in quests:
-        if q.get('done') and not q.get('notified', False):
-            info = get_quest_info(q['id'])
-            if info:
-                msgs_to_send.append(info)
-            q['notified']  = True
-            notify_changed = True
-            
-    if notify_changed:
-        data_fresh[uid]['daily_quests'][today] = quests
-        save_data(data_fresh)
+    msgs_to_send = claim_completed_quest_notifications(uid, today)
 
     await _ensure_role_synced(member, new_level)
     
@@ -923,7 +1019,7 @@ async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: boo
     checkpoint = last_checkpoint.get(member.id, join_times[member.id])
     remaining  = int((now - checkpoint).total_seconds())
     if remaining > 0 and member.id in media_active_members and not in_pomodoro:
-        result = add_study_time(member.id, member.display_name, remaining)
+        result = add_study_time(member.id, member.display_name, remaining, start_time=checkpoint, end_time=now)
         if result and result.get('level_up'):
             await _ensure_role_synced(member, result['new_level'])
             await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{result["new_level"]} {LEVEL_NAMES[result["new_level"]]}** 🎊')
@@ -941,20 +1037,7 @@ async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: boo
     final_secs = data_now.get(uid, {}).get('daily', {}).get(today, 0)
 
     update_quest_progress(uid, today, override_today_secs=final_secs)
-    data_after   = load_data()
-    quests_after = data_after.get(uid, {}).get('daily_quests', {}).get(today, [])
-    just_done_info: list[dict] = []
-    
-    for q in quests_after:
-        if q.get('done') and not q.get('notified', False):
-            info = get_quest_info(q['id'])
-            if info:
-                just_done_info.append(info)
-            q['notified'] = True
-            
-    if just_done_info:
-        data_after[uid]['daily_quests'][today] = quests_after
-        save_data(data_after)
+    just_done_info = claim_completed_quest_notifications(uid, today)
 
     new_badges = check_and_award_badges(uid, member)
     
@@ -1026,11 +1109,7 @@ async def update_live_message(server: dict):
         if m.voice.channel.id not in voice_ids: continue
         uid   = str(mid)
         saved = data.get(uid, {}).get('daily', {}).get(today, 0)
-        if mid in media_active_members:
-            chk         = last_checkpoint.get(mid, start_time)
-            today_total = saved + int((now - chk).total_seconds())
-        else:
-            today_total = saved
+        today_total = saved + _get_unsaved_study_seconds(mid, now)
         active.append({
             'm':       m,
             'session': int((now - start_time).total_seconds()),
@@ -1316,6 +1395,7 @@ async def scheduled_tasks():
     if now.hour == 0 and now.minute == 0:
         session_counts.clear()
         daily_first_join.clear()
+        _rebuild_daily_session_state(now)
         today_key     = now.strftime('%Y-%m-%d')
         yesterday_key = (now - timedelta(days=1)).strftime('%Y-%m-%d')
         report_sent_today.intersection_update({today_key, yesterday_key})
@@ -1356,6 +1436,7 @@ async def checkpoint_task():
             await _check_quests_and_badges(member)
         elif in_pomo and was_active:
             last_checkpoint[mid] = datetime.now()
+            save_runtime_state()  # FIX: Persist checkpoint timestamp for pomodoro sessions
         
         if now_active and not was_active:
             media_active_members.add(mid)
@@ -1443,7 +1524,20 @@ async def _check_absences():
             dirty = True
             break
     if dirty:
-        save_data(data)
+        def persist_warnings(current: dict):
+            for uid, info in data.items():
+                if uid in current and info.get('last_absent_warn'):
+                    current[uid]['last_absent_warn'] = info['last_absent_warn']
+
+        update_data(persist_warnings)
+
+async def _sync_member_progress(member: discord.Member, previous_level: int | None = None):
+    await _check_quests_and_badges(member)
+    if previous_level is None:
+        return
+    current_level = load_data().get(str(member.id), {}).get('level', 0)
+    if current_level > previous_level:
+        await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{current_level} {LEVEL_NAMES[current_level]}** 🎊')
 
 # ─── AI ──────────────────────────────────────────────────────────────────────
 
@@ -1479,9 +1573,7 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
     total   = info.get('total', 0)
     today   = datetime.now().strftime('%Y-%m-%d')
     saved   = info.get('daily', {}).get(today, 0)
-    if target.id in join_times and target.id in media_active_members:
-        chk   = last_checkpoint.get(target.id, join_times[target.id])
-        saved += int((datetime.now() - chk).total_seconds())
+    saved += _get_unsaved_study_seconds(target.id)
     lv_now = get_level(xp)
     if lv_now >= len(LEVEL_THRESHOLDS) - 1:
         xp_needed = 0; pct = 100; bar_f = 20
@@ -1539,18 +1631,16 @@ async def slash_quest(interaction: discord.Interaction):
 
     raw = load_data()
     if uid not in raw:
-        raw[uid] = _default_user(interaction.user.display_name)
-        save_data(raw)
+        def ensure_user(data: dict):
+            data.setdefault(uid, _default_user(interaction.user.display_name))
+
+        update_data(ensure_user)
 
     data = _get_live_enriched_data()
 
     mid         = interaction.user.id
     saved_secs  = data[uid]['daily'].get(today, 0)
-    if mid in join_times and mid in media_active_members:
-        chk             = last_checkpoint.get(mid, join_times[mid])
-        real_today_secs = saved_secs + int((datetime.now() - chk).total_seconds())
-    else:
-        real_today_secs = saved_secs
+    real_today_secs = saved_secs + _get_unsaved_study_seconds(mid)
 
     generate_daily_quests(uid, today)
     update_quest_progress(uid, today, override_today_secs=real_today_secs)
@@ -1588,8 +1678,10 @@ async def slash_badges(interaction: discord.Interaction, member: discord.Member 
     if target.id == interaction.user.id:
         raw = load_data()
         if uid not in raw:
-            raw[uid] = _default_user(interaction.user.display_name)
-            save_data(raw)
+            def ensure_user(data: dict):
+                data.setdefault(uid, _default_user(interaction.user.display_name))
+
+            update_data(ensure_user)
     data   = _get_live_enriched_data()
     if uid not in data:
         await interaction.followup.send(
@@ -1646,8 +1738,10 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
     if target.id == interaction.user.id:
         raw = load_data()
         if uid not in raw:
-            raw[uid] = _default_user(interaction.user.display_name)
-            save_data(raw)
+            def ensure_user(data: dict):
+                data.setdefault(uid, _default_user(interaction.user.display_name))
+
+            update_data(ensure_user)
     data   = _get_live_enriched_data()
     if uid not in data:
         await interaction.followup.send(
@@ -1656,9 +1750,7 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
     info        = data[uid]
     today       = datetime.now().strftime('%Y-%m-%d')
     today_saved = info.get('daily', {}).get(today, 0)
-    if target.id in join_times and target.id in media_active_members:
-        chk         = last_checkpoint.get(target.id, join_times[target.id])
-        today_saved += int((datetime.now() - chk).total_seconds())
+    today_saved += _get_unsaved_study_seconds(target.id)
     xp         = info.get('xp', 0)
     level      = min(info.get('level', 0), len(LEVEL_NAMES) - 1)
     streak     = info.get('streak', 0)
@@ -1701,10 +1793,7 @@ async def slash_leaderboard(interaction: discord.Interaction):
             mid = int(uid_str)
         except (ValueError, TypeError):
             return s
-        if mid in join_times and mid in media_active_members:
-            chk = last_checkpoint.get(mid, join_times[mid])
-            s  += int((now - chk).total_seconds())
-        return s
+        return s + _get_unsaved_study_seconds(mid, now)
 
     entries = [(u, i, real_time(u, i)) for u, i in data.items()]
     top10   = sorted(
@@ -1772,11 +1861,7 @@ async def slash_studying(interaction: discord.Interaction):
         secs  = int((now - st).total_seconds())
         uid   = str(mid)
         saved = data.get(uid, {}).get('daily', {}).get(today, 0)
-        if mid in media_active_members:
-            chk   = last_checkpoint.get(mid, st)
-            total = saved + int((now - chk).total_seconds())
-        else:
-            total = saved
+        total = saved + _get_unsaved_study_seconds(mid, now)
         icon  = media_status_icon(m.voice)
         count += 1
         lines.append(f'{icon} **{m.display_name}** | Phiên: `{format_time(secs)}` | Hôm nay: `{format_time(total)}`')
@@ -1798,12 +1883,15 @@ async def slash_setgoal(
     total = hours * 3600 + minutes * 60
     if total <= 0:
         await interaction.followup.send('❌ Ít nhất 1 phút!', ephemeral=True); return
-    data = load_data()
     uid  = str(interaction.user.id)
-    if uid not in data: data[uid] = _default_user(interaction.user.display_name)
-    data[uid]['goal']         = goal
-    data[uid]['goal_seconds'] = total
-    save_data(data)
+
+    def save_goal(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(interaction.user.display_name)
+        data[uid]['goal'] = goal
+        data[uid]['goal_seconds'] = total
+
+    update_data(save_goal)
     await interaction.followup.send(
         f'✅ Mục tiêu: **"{goal}"** — `{format_time(total)}`/ngày 💪', ephemeral=True
     )
@@ -1815,25 +1903,29 @@ async def slash_setgoal(
 async def slash_remind(interaction: discord.Interaction, hour: app_commands.Range[int, -1, 23]):
     await interaction.response.defer(ephemeral=True)
     uid  = str(interaction.user.id)
-    data = load_data()
 
     if hour == -1:
         old = remind_tasks.pop(interaction.user.id, None)
         if old:
             task = old[1]
             if task and not task.done(): task.cancel()
-        if uid in data:
-            data[uid]['remind_hour'] = None
-            save_data(data)
+
+        def disable_remind(data: dict):
+            if uid in data:
+                data[uid]['remind_hour'] = None
+
+        update_data(disable_remind)
         await interaction.followup.send(
             '🔕 Đã tắt nhắc học.\n_Dùng `/remind <giờ>` để bật lại._', ephemeral=True
         )
         return
 
-    if uid not in data:
-        data[uid] = _default_user(interaction.user.display_name)
-    data[uid]['remind_hour'] = hour
-    save_data(data)
+    def enable_remind(data: dict):
+        if uid not in data:
+            data[uid] = _default_user(interaction.user.display_name)
+        data[uid]['remind_hour'] = hour
+
+    update_data(enable_remind)
 
     old = remind_tasks.pop(interaction.user.id, None)
     if old:
@@ -2002,9 +2094,7 @@ async def cmd_stats(ctx, member: discord.Member = None):
     info       = data[uid]
     today      = datetime.now().strftime('%Y-%m-%d')
     saved      = info.get('daily', {}).get(today, 0)
-    if target.id in join_times and target.id in media_active_members:
-        chk   = last_checkpoint.get(target.id, join_times[target.id])
-        saved += int((datetime.now() - chk).total_seconds())
+    saved += _get_unsaved_study_seconds(target.id)
     recent = sorted(info.get('daily', {}).items(), reverse=True)[:7]
     await ctx.send(
         f'📊 **{target.display_name}** — `Lv.{info.get("level",0)}` ⚡{info.get("xp",0):,} XP\n'
@@ -2025,10 +2115,7 @@ async def cmd_leaderboard(ctx):
             mid = int(uid_str)
         except (ValueError, TypeError):
             return s
-        if mid in join_times and mid in media_active_members:
-            chk = last_checkpoint.get(mid, join_times[mid])
-            s  += int((now - chk).total_seconds())
-        return s
+        return s + _get_unsaved_study_seconds(mid, now)
 
     entries = [(u, i, real_time(u, i)) for u, i in data.items()]
     top10   = sorted(
@@ -2057,11 +2144,7 @@ async def cmd_quest(ctx):
         await ctx.send('❌ Chưa có dữ liệu! Vào phòng học trước.'); return
     mid        = ctx.author.id
     saved_secs = data[uid]['daily'].get(today, 0)
-    if mid in join_times and mid in media_active_members:
-        chk       = last_checkpoint.get(mid, join_times[mid])
-        real_secs = saved_secs + int((datetime.now() - chk).total_seconds())
-    else:
-        real_secs = saved_secs
+    real_secs = saved_secs + _get_unsaved_study_seconds(mid)
     generate_daily_quests(uid, today)
     update_quest_progress(uid, today, override_today_secs=real_secs)
     data   = load_data()
@@ -2130,14 +2213,15 @@ async def on_ready():
             cog = create_pomodoro_cog(
                 bot, add_study_time, safe_send_dm, format_time,
                 load_data_fn=load_data, save_data_fn=save_data,
-                add_xp_fn=add_xp_direct,
+                add_xp_fn=add_xp_direct, update_data_fn=update_data,
+                progress_sync_fn=_sync_member_progress,
             )
             await bot.add_cog(cog)
             log.info('✅ Pomodoro Cog loaded')
         except Exception as e:
             log.error(f'Pomodoro error: {e}')
 
-    await setup_weekly_report(bot, load_data, save_data, BADGES, safe_send_dm)
+    await setup_weekly_report(bot, load_data, save_data, BADGES, safe_send_dm, update_data_fn=update_data)
 
     for guild in bot.guilds:
         try:
@@ -2243,14 +2327,20 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 save_runtime_state()
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
         elif was_active and not now_active:
-            if not in_pomodoro:
+            if in_pomodoro:
+                previous_level = load_data().get(str(member.id), {}).get('level', 0)
+                await _force_stop_pomodoro_if_active(member, reason='tắt Cam/Stream')
+                media_active_members.discard(member.id)
+                save_runtime_state()
+                await _sync_member_progress(member, previous_level)
+            else:
                 elapsed, result = await _do_checkpoint(member)
                 if result and result.get('level_up'):
                     await _ensure_role_synced(member, result['new_level'])
                     await safe_send_dm(member, f'🎉 **LEVEL UP! Bạn đã đạt Lv.{result["new_level"]} {LEVEL_NAMES[result["new_level"]]}** 🎊')
                 await _check_quests_and_badges(member)
-            media_active_members.discard(member.id)
-            save_runtime_state()
+                media_active_members.discard(member.id)
+                save_runtime_state()
             start_check(member, 'tắt Cam/Stream')
             await safe_send_dm(member,
                 f'⚠️ Vừa tắt Cam/Stream!\n'
@@ -2475,11 +2565,7 @@ def _update_live_cache():
         uid      = str(mid)
         info     = data.get(uid, {})
         saved    = info.get('daily', {}).get(today, 0)
-        if mid in media_active_members:
-            chk     = last_checkpoint.get(mid, start)
-            unsaved = int((now - chk).total_seconds())
-        else:
-            unsaved = 0
+        unsaved = _get_unsaved_study_seconds(mid, now)
         is_stream = is_video = False
         for guild in bot.guilds:
             m = guild.get_member(mid)
