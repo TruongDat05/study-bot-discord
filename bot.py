@@ -6,15 +6,15 @@ from discord import app_commands
 import asyncio
 import logging
 import os
-import sys                    # ✅ THÊM - cho error handling
+import sys                    
 import json
 import random
 import threading
 import io
 import shutil
-import tempfile               # ✅ THÊM - cho atomic file operations
+import tempfile               
 from copy import deepcopy
-from pathlib import Path      # ✅ THÊM - cho cross-platform paths
+from pathlib import Path      
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
@@ -57,7 +57,7 @@ REPORT_MINUTE       = 0
 DAILY_BOARD_HOUR    = 0
 DAILY_BOARD_MINUTE  = 0
 
-# ✅ Docker-compatible path configuration
+
 DATA_DIR_ENV = os.getenv('DATA_DIR')
 if DATA_DIR_ENV:
     # Running in Docker - use mounted volume
@@ -212,7 +212,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ✅ THÊM: Suppress noisy libraries
+#  Suppress noisy libraries
 logging.getLogger('discord').setLevel(logging.WARNING)
 logging.getLogger('discord.http').setLevel(logging.WARNING)
 
@@ -316,7 +316,7 @@ def update_data(mutator):
     """
     with _data_lock:
         data = _load_data_unlocked()
-        # ✅ FIX: Create snapshot BEFORE mutation (optional, for debugging)
+        #  Create snapshot BEFORE mutation (optional, for debugging)
         # snapshot = deepcopy(data)
         result = mutator(data)
         _save_data_unlocked(data)
