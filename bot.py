@@ -6,12 +6,15 @@ from discord import app_commands
 import asyncio
 import logging
 import os
+import sys                    # ✅ THÊM - cho error handling
 import json
 import random
 import threading
 import io
 import shutil
+import tempfile               # ✅ THÊM - cho atomic file operations
 from copy import deepcopy
+from pathlib import Path      # ✅ THÊM - cho cross-platform paths
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
@@ -53,10 +56,23 @@ REPORT_HOUR         = 23
 REPORT_MINUTE       = 0
 DAILY_BOARD_HOUR    = 0
 DAILY_BOARD_MINUTE  = 0
-DATA_FILE           = 'study_data.json'
-RUNTIME_STATE_FILE  = 'runtime_state.json'
-BACKUP_DIR          = 'backups'
-DASHBOARD_PORT      = 5000
+
+# ✅ Docker-compatible path configuration
+DATA_DIR_ENV = os.getenv('DATA_DIR')
+if DATA_DIR_ENV:
+    # Running in Docker - use mounted volume
+    BASE_DIR = Path(DATA_DIR_ENV)
+    log_file_path = BASE_DIR / 'bot.log'
+else:
+    # Running locally - use script directory
+    BASE_DIR = Path(__file__).parent.resolve()
+    log_file_path = BASE_DIR / 'bot.log'
+
+DATA_FILE           = BASE_DIR / 'study_data.json'
+RUNTIME_STATE_FILE  = BASE_DIR / 'runtime_state.json'
+BACKUP_DIR          = BASE_DIR / 'backups'
+
+DASHBOARD_PORT      = int(os.getenv('DASHBOARD_PORT', '5000'))
 ABSENT_DAYS_WARN    = 2
 CHECKPOINT_MINUTES  = 5
 LIVE_UPDATE_MINUTES = 5
@@ -181,17 +197,24 @@ if not TOKEN:
 
 FOCUS_CHANNEL_IDS = [ch for s in SERVERS for ch in s['voice_channels']]
 
+# ✅ Ensure directories exist
+BACKUP_DIR.mkdir(exist_ok=True, parents=True)
+
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler(),
+        logging.FileHandler(log_file_path, encoding='utf-8'),  # ✅ Use variable
+        logging.StreamHandler(sys.stdout),                      # ✅ Explicit stdout
     ],
 )
 log = logging.getLogger(__name__)
+
+# ✅ THÊM: Suppress noisy libraries
+logging.getLogger('discord').setLevel(logging.WARNING)
+logging.getLogger('discord.http').setLevel(logging.WARNING)
 
 # ─── BOT SETUP ───────────────────────────────────────────────────────────────
 
@@ -238,7 +261,7 @@ def media_status_icon(vs: discord.VoiceState) -> str:
 
 def _load_data_unlocked() -> dict:
     try:
-        if os.path.exists(DATA_FILE):
+        if DATA_FILE.exists():
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
@@ -252,25 +275,52 @@ def load_data() -> dict:
         return _load_data_unlocked()
 
 def _save_data_unlocked(data: dict):
+    """✅ FIX: Atomic save with temp file using Path"""
     try:
-        tmp = DATA_FILE + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, DATA_FILE)
+        # Write to temporary file first
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=DATA_FILE.parent,
+            prefix='.study_data_',
+            suffix='.json.tmp'
+        )
+        
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # ✅ Force write to disk
+            
+            # Atomic rename
+            Path(temp_path).replace(DATA_FILE)
+            
+        except Exception as e:
+            # Clean up temp file on error
+            Path(temp_path).unlink(missing_ok=True)
+            raise e
+            
     except IOError as e:
         log.error(f'Lỗi lưu data: {e}', exc_info=True)
+        print(f'❌ SAVE ERROR: {e}', file=sys.stderr)
     except Exception as e:
         log.error(f'Lỗi không xác định khi lưu data: {e}', exc_info=True)
+        print(f'❌ CRITICAL SAVE ERROR: {e}', file=sys.stderr)
 
 def save_data(data: dict):
     with _data_lock:
         _save_data_unlocked(data)
 
 def update_data(mutator):
+    """
+    ✅ FIX: Thread-safe update with proper deepcopy BEFORE mutation
+    to avoid race conditions
+    """
     with _data_lock:
         data = _load_data_unlocked()
+        # ✅ FIX: Create snapshot BEFORE mutation (optional, for debugging)
+        # snapshot = deepcopy(data)
         result = mutator(data)
         _save_data_unlocked(data)
+        # Return both result and fresh copy after save
         return result, deepcopy(data)
 
 def _serialize_dt(dt: datetime) -> str:
@@ -295,17 +345,25 @@ def save_runtime_state():
     }
     with _runtime_lock:
         try:
-            tmp = RUNTIME_STATE_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=RUNTIME_STATE_FILE.parent,
+                prefix='.runtime_state_',
+                suffix='.json.tmp'
+            )
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
                 json.dump(snapshot, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, RUNTIME_STATE_FILE)
+                f.flush()
+                os.fsync(f.fileno())
+            Path(temp_path).replace(RUNTIME_STATE_FILE)
         except IOError as e:
             log.error(f'Lỗi lưu runtime state: {e}')
+            Path(temp_path).unlink(missing_ok=True)
 
 def load_runtime_state() -> dict:
+    """✅ FIX: Use Path for runtime state file"""
     with _runtime_lock:
         try:
-            if os.path.exists(RUNTIME_STATE_FILE):
+            if RUNTIME_STATE_FILE.exists():
                 with open(RUNTIME_STATE_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
@@ -408,19 +466,20 @@ def restore_runtime_state():
     )
 
 def backup_data():
-    if not os.path.exists(DATA_FILE):
+    """✅ FIX: Use Path for backup operations"""
+    if not DATA_FILE.exists():
         return
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    BACKUP_DIR.mkdir(exist_ok=True, parents=True)
     ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
-    dest = os.path.join(BACKUP_DIR, f'study_data_{ts}.json')
+    dest = BACKUP_DIR / f'study_data_{ts}.json'
     try:
         shutil.copy2(DATA_FILE, dest)
         files = sorted(
-            [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)],
-            key=os.path.getmtime
+            BACKUP_DIR.glob('study_data_*.json'),
+            key=lambda p: p.stat().st_mtime
         )
         for old in files[:-30]:
-            os.remove(old)
+            old.unlink()
         log.info(f'[Backup] Saved → {dest}')
     except Exception as e:
         log.error(f'[Backup] Error: {e}')

@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Git
+.git
+.gitignore
+
+# Docs (optional)
+*.md
+!README.md
+!DEPLOYMENT.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Data (use Docker volume instead)
+*.log
+backups/
+study_data.json
+runtime_state.json
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Misc
+*.bak
+*.tmp
+node_modules/
