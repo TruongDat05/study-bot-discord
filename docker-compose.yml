@@ -1,65 +1,41 @@
-version: '3.8'
-
 services:
   bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: study-bot
-    init: true  # Proper signal handling
     restart: unless-stopped
-    
+
     volumes:
-      # ✅ Persistent data volume
       - bot-data:/data
-      
-      # ✅ Optional: Mount config for easy editing
-      # - ./.env:/app/.env:ro
-    
+
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?DISCORD_TOKEN is required}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      DATA_DIR: /data  # ✅ Tell bot where to save data
+      DATA_DIR: /data
       DASHBOARD_PORT: ${DASHBOARD_PORT:-5000}
-    
+
     ports:
-      # ✅ Expose dashboard (optional - only if you need external access)
       - "${DASHBOARD_PORT:-5000}:5000"
-    
+
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import os; exit(0 if os.path.exists(\"/data/study_data.json\") else 1)'"]
+      test: ["CMD-SHELL", "python -c 'import os; exit(0 if os.path.isdir(\"/data\") and os.access(\"/data\", os.W_OK) else 1)'"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    
+
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    
-    # ✅ Security: Limit resources
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
 
 volumes:
   bot-data:
     driver: local
-    # ✅ Optional: Bind to host path for easier backup
-    # driver_opts:
-    #   type: none
-    #   o: bind
-    #   device: /home/user/study-bot-data
 
-# ✅ Optional: Add network for future expansion
 networks:
   default:
     name: studybot-network
