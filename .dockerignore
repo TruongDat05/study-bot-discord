@@ -39,4 +39,6 @@ data/
 # Misc
 *.bak
 *.tmp
-node_modules/
+
+# ✅ IMPORTANT: DO NOT IGNORE
+!requirements.txt
