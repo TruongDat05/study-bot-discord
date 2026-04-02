@@ -47,14 +47,17 @@ OPENROUTER_TITLE   = os.getenv('OPENROUTER_APP_NAME', 'Study Discord Bot')
 
 SERVERS = [
     {
-        'voice_channels': [1483271561036435660, 1483301292427186358],
+        'voice_channels': [
+            1483271561036435660, 
+            1483301292427186358,
+            1489183048665923735, 
+            1489183241473626142, 
+            1489183303226621992
+        ],
         'report_channel': 1483288436369653861,
     },
-    {
-        'voice_channels': [1483284081872601098],
-        'report_channel': 1483284081872601093,
-    },
 ]
+
 
 WARN_BEFORE_KICK    = 10
 WAIT_SECONDS        = 60
