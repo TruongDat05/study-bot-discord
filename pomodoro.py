@@ -139,7 +139,7 @@ class GroupSession:
     break_minutes: int
     total_rounds:  int
     channel:       discord.TextChannel
-    guild_id:      int
+    guild_id:      int | None
 
     members:       dict[int, PomodoroSession] = field(default_factory=dict)
     current_round: int      = 1
@@ -192,6 +192,28 @@ class PomodoroCog(commands.Cog):
         self._groups:   dict[str, GroupSession]    = {}
         # lịch sử in-memory (vẫn giữ để tương thích) — v2 cũng lưu vào file
         self._history:  dict[int, dict]            = {}
+
+    @staticmethod
+    def _normalize_group_name(name: str) -> str:
+        return ' '.join(str(name or '').split()).strip()
+
+    def _new_group_session_id(self, guild_id: int | None) -> str:
+        while True:
+            stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+            session_id = f'{guild_id}_{stamp}_{random.randint(1000, 9999)}'
+            if session_id not in self._groups:
+                return session_id
+
+    def _find_group_by_name(self, guild_id: int | None, name: str) -> Optional[GroupSession]:
+        target = self._normalize_group_name(name)
+        for group in self._groups.values():
+            if group.guild_id == guild_id and group.name == target:
+                return group
+        matches = [
+            group for group in self._groups.values()
+            if group.guild_id == guild_id and group.name.casefold() == target.casefold()
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     # ─── SLASH COMMAND GROUP ─────────────────────────────────────────────────
 
@@ -391,6 +413,13 @@ class PomodoroCog(commands.Cog):
     ):
         member   = interaction.user
         guild_id = interaction.guild_id
+        name     = self._normalize_group_name(name)
+        if not name:
+            await interaction.response.send_message(
+                '❌ Tên phòng không được để trống.',
+                ephemeral=True
+            )
+            return
 
         # Kiểm tra member đang có session không
         if member.id in self._sessions:
@@ -400,15 +429,14 @@ class PomodoroCog(commands.Cog):
             )
             return
 
-        # Tạo ID ngắn gọn từ tên
-        session_id = f'{guild_id}_{name.lower().replace(" ", "_")}'
-        if session_id in self._groups:
+        if self._find_group_by_name(guild_id, name):
             await interaction.response.send_message(
                 f'❌ Phòng **"{name}"** đã tồn tại trong server này!\n'
                 f'Dùng `/pomodoro join {name}` để tham gia, hoặc chọn tên khác.',
                 ephemeral=True
             )
             return
+        session_id = self._new_group_session_id(guild_id)
 
         grp = GroupSession(
             session_id    = session_id,
@@ -453,8 +481,8 @@ class PomodoroCog(commands.Cog):
     @app_commands.describe(name='Tên phòng cần tham gia')
     async def pomo_join(self, interaction: discord.Interaction, name: str):
         member     = interaction.user
-        session_id = f'{interaction.guild_id}_{name.lower().replace(" ", "_")}'
-        grp        = self._groups.get(session_id)
+        name       = self._normalize_group_name(name)
+        grp        = self._find_group_by_name(interaction.guild_id, name)
 
         if not grp:
             # Gợi ý các phòng đang có
@@ -598,7 +626,7 @@ class PomodoroCog(commands.Cog):
 
         total_rounds  = history.get('total_rounds', 0)
         total_minutes = history.get('total_minutes', 0)
-        total_xp      = history.get('total_xp', 0)
+        total_xp      = total_rounds * XP_PER_ROUND
         best_streak   = history.get('best_streak', 0)
         # today_rounds: đọc từ file nếu today_date khớp
         if file_h.get('today_date') == today:
@@ -1098,8 +1126,8 @@ class PomodoroCog(commands.Cog):
         partial=False (mặc định): tính tổng sess.completed_rounds.
 
         LƯU Ý v2: _award_pomodoro_xp đã được gọi riêng sau mỗi vòng,
-        nên _update_history chỉ cập nhật lịch sử (total_rounds, total_minutes)
-        và KHÔNG gọi _add_xp thêm lần nữa để tránh nhân đôi.
+        nên _update_history chỉ cập nhật lịch sử. total_xp được suy ra từ
+        total_rounds để không bị cộng lệch so với XP Pomodoro thực tế.
         
         FIX: Always reload data at start to avoid race conditions with external saves.
         """
@@ -1127,10 +1155,10 @@ class PomodoroCog(commands.Cog):
 
         h['total_rounds']   += rounds_done
         h['total_minutes']  += minutes
-        h['total_xp']       += xp_bonus
         h['today_rounds']   += rounds_done
         h['current_streak'] += rounds_done
         h['best_streak']     = max(h['best_streak'], h['current_streak'])
+        h['total_xp']        = h['total_rounds'] * XP_PER_ROUND
 
         try:
             uid  = str(member_id)

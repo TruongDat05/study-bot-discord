@@ -35,6 +35,22 @@ TIER_EXCELLENT  = 20    # >= 20h/tuần
 TIER_GOOD       = 10    # >= 10h
 TIER_OK         = 3     # >= 3h
 
+CLASS_THRESHOLDS = [0, 100, 500, 1500, 5000, 15000, 50000, 100000, 250000, 500000, 1000000]
+CLASS_NAMES = [
+    'Newbie', 'Worker', 'Student', 'Trader', 'Rich', 'Elite',
+    'Millionaire', 'Tycoon', 'Noble', 'King', 'Legend',
+]
+
+def configure_class_config(
+    class_thresholds: list[int] | tuple[int, ...] | None = None,
+    class_names: list[str] | tuple[str, ...] | None = None,
+):
+    global CLASS_THRESHOLDS, CLASS_NAMES
+    if class_thresholds:
+        CLASS_THRESHOLDS = list(class_thresholds)
+    if class_names:
+        CLASS_NAMES = list(class_names)
+
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 def _week_dates(offset: int = 0) -> list[str]:
@@ -64,6 +80,34 @@ def _format_time(seconds: int) -> str:
     if h > 0 and m > 0: return f'{h}h {m}m'
     if h > 0:            return f'{h}h'
     return f'{m}m'
+
+def _format_coins(amount: int | float) -> str:
+    try:
+        amount = int(round(amount))
+    except (TypeError, ValueError):
+        amount = 0
+    return f'{amount:,} coins'
+
+def _money_class(amount: int) -> int:
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        amount = 0
+    for idx in range(len(CLASS_THRESHOLDS) - 1, -1, -1):
+        if amount >= CLASS_THRESHOLDS[idx]:
+            return idx
+    return 0
+
+def _class_label(info: dict) -> str:
+    class_idx = info.get('class')
+    if class_idx is None:
+        class_idx = _money_class(info.get('total_earned', 0))
+    try:
+        class_idx = int(class_idx)
+    except (TypeError, ValueError):
+        class_idx = 0
+    class_idx = max(0, min(class_idx, len(CLASS_NAMES) - 1))
+    return f'Class {class_idx} {CLASS_NAMES[class_idx]}'
 
 def _diff_str(this_week: int, last_week: int) -> str:
     diff = this_week - last_week
@@ -146,7 +190,7 @@ def _personalized_advice(
             f'Thêm ~{need:.0f}h nữa sẽ đạt mức xuất sắc. Bạn làm được! 💪'
         )
     if this_h >= TIER_OK:
-        extra_tip = f'\n🎯 Bạn đã làm {quests_done} quest — thêm quest để tăng XP nhanh hơn!' if quests_done > 0 else ''
+        extra_tip = f'\n🎯 Bạn đã làm {quests_done} quest — thêm quest để kiếm coins nhanh hơn!' if quests_done > 0 else ''
         return (
             f'👍 **{this_h:.1f} tiếng** — ổn, nhưng còn tiềm năng hơn!\n'
             f'Đặt goal {TIER_GOOD}h/tuần bằng lệnh `/setgoal`.{extra_tip}'
@@ -170,8 +214,9 @@ def _build_weekly_dm(
     diff_text   = _diff_str(this_secs, last_secs)
     streak      = info.get('streak', 0)
     longest     = info.get('longest_streak', 0)
-    xp          = info.get('xp', 0)
-    level       = info.get('level', 0)
+    balance     = info.get('balance', 0)
+    total_earned = info.get('total_earned', 0)
+    debt        = info.get('debt', 0)
     total_secs  = info.get('total', 0)
     quests_done = info.get('quests_done_total', 0)
 
@@ -218,7 +263,8 @@ def _build_weekly_dm(
         + '\n'.join(chart_lines) + '\n\n'
         f'**Độ đều đặn:** {day_icons} `{active_days}/7 ngày`\n'
         f'🔥 **Streak:** `{streak} ngày` _(kỷ lục: {longest})_\n'
-        f'⚡ **Level:** `Lv.{level}` · `{xp:,} XP`\n'
+        f'🏛️ **Class:** `{_class_label(info)}`\n'
+        f'💰 **Total earned:** `{_format_coins(total_earned)}` · Balance `{_format_coins(balance)}` · Debt `{_format_coins(debt)}`\n'
         + badge_section + '\n'
         f'━━━━━━━━━━━━━━━━━━━━━━\n'
         f'💬 **Nhận xét:**\n{advice}\n\n'
@@ -235,7 +281,11 @@ def create_weekly_report_cog(
     all_badges: dict,
     safe_send_dm_fn,
     update_data_fn=None,
+    class_thresholds=None,
+    class_names=None,
 ):
+    configure_class_config(class_thresholds, class_names)
+
     class WeeklyReportCog(discord.ext.commands.Cog, name='WeeklyReport'):
 
         def __init__(self):
@@ -258,9 +308,13 @@ def create_weekly_report_cog(
                     def ensure_user(current: dict):
                         current.setdefault(uid, {
                             'name': interaction.user.display_name,
-                            'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                            'daily': {}, 'daily_earnings': {}, 'total': 0,
+                            'balance': 0, 'total_earned': 0, 'debt': 0,
+                            'net_worth': 0, 'class': 0, 'xp': 0, 'level': 0,
                             'streak': 0, 'longest_streak': 0, 'last_study_date': '',
                             'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                            'coins_acc_secs': 0, 'transactions': [], 'active_loans': [],
+                            'loan_offers': [], 'loan_history': [], 'credit_score': 600,
                             'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
                             'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
                         })
@@ -269,9 +323,13 @@ def create_weekly_report_cog(
                 else:
                     data[uid] = {
                         'name': interaction.user.display_name,
-                        'daily': {}, 'total': 0, 'xp': 0, 'level': 0,
+                        'daily': {}, 'daily_earnings': {}, 'total': 0,
+                        'balance': 0, 'total_earned': 0, 'debt': 0,
+                        'net_worth': 0, 'class': 0, 'xp': 0, 'level': 0,
                         'streak': 0, 'longest_streak': 0, 'last_study_date': '',
                         'goal': None, 'goal_seconds': 0, 'last_absent_warn': '',
+                        'coins_acc_secs': 0, 'transactions': [], 'active_loans': [],
+                        'loan_offers': [], 'loan_history': [], 'credit_score': 600,
                         'badges': [], 'badge_dates': {}, 'quests_done_total': 0,
                         'daily_quests': {}, 'special_flags': [], 'remind_hour': None,
                     }
@@ -389,13 +447,12 @@ def create_weekly_report_cog(
                 for i, (uid, info, secs) in enumerate(top10, 1):
                     medal  = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f'`{i}.`'
                     streak = info.get('streak', 0)
-                    level  = info.get('level', 0)
                     # So sánh với tuần trước
                     last_w = _week_total(info, _week_dates(-1))
                     trend  = _trend_icon(secs, last_w)
                     lines.append(
-                        f'{medal} {trend} **{info["name"]}** `Lv.{level}` 🔥{streak}\n'
-                        f'       ⏱️ Tuần này: `{_format_time(secs)}`'
+                        f'{medal} {trend} **{info["name"]}** `{_class_label(info)}` 🔥{streak}\n'
+                        f'       ⏱️ Tuần này: `{_format_time(secs)}` · 💰 `{_format_coins(info.get("total_earned", 0))}`'
                     )
 
             await interaction.followup.send('\n'.join(lines))
@@ -609,13 +666,15 @@ def create_weekly_report_cog(
             await bot.wait_until_ready()
 
         async def cog_load(self):
-            if not self._weekly_task_started:
+            if not self._weekly_ticker.is_running():
                 self._weekly_ticker.start()
-                self._weekly_task_started = True
                 log.info('[WeeklyReport] Ticker khởi động.')
+            self._weekly_task_started = True
 
         async def cog_unload(self):
-            self._weekly_ticker.stop()
+            if self._weekly_ticker.is_running():
+                self._weekly_ticker.stop()
+            self._weekly_task_started = False
 
     return WeeklyReportCog()
 
@@ -628,11 +687,17 @@ async def setup_weekly_report(
     all_badges: dict,
     safe_send_dm_fn,
     update_data_fn=None,
+    class_thresholds=None,
+    class_names=None,
 ):
+    configure_class_config(class_thresholds, class_names)
     if bot.cogs.get('WeeklyReport'):
         return
     cog = create_weekly_report_cog(
-        bot, load_data_fn, save_data_fn, all_badges, safe_send_dm_fn, update_data_fn=update_data_fn
+        bot, load_data_fn, save_data_fn, all_badges, safe_send_dm_fn,
+        update_data_fn=update_data_fn,
+        class_thresholds=class_thresholds,
+        class_names=class_names,
     )
     await bot.add_cog(cog)
     # Ghi chú: bot.add_cog tự động đăng ký weekly_group vào bot.tree
