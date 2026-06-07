@@ -22,6 +22,10 @@ venv/
 env/
 ENV/
 
+# Project packages required at runtime
+!services/
+!services/**/*.py
+
 # Data (use Docker volume instead)
 *.log
 backups/
