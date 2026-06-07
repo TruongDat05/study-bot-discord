@@ -1,20 +1,15 @@
-# Secrets
 .env
-
-# Python cache
 __pycache__/
 *.pyc
-
-# Logs / temp / backup
 bot.log
 backups/
 tmp/
 
-# Ignore database mặc định
+study_data.json
+guild_config.json
+runtime_state.json
+role_config.json
+
+data/
 *.db
 *.sqlite3
-
-# Nhưng cho phép push riêng database chính
-!data/
-data/*
-!data/bot.db
