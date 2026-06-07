@@ -12,18 +12,23 @@ import sys
 import json
 import random
 import re
+import textwrap
+import calendar
+import sqlite3
 import threading
 import io
-import shutil
-import tempfile               
 import math
 import httpx
+import contextvars
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path      
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
 from pomodoro import PomodoroSession, create_pomodoro_cog
+from services.database import DatabaseService
+from services.repositories import BotRepository
 from weekly_report import setup_weekly_report
 
 try:
@@ -36,14 +41,23 @@ except ImportError:
 
 load_dotenv()
 
-def _env_int(name: str, default: int | None = None) -> int | None:
+def _env_int(name: str, default: int = 0) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == '':
-        return default
+        return int(default)
     try:
         return int(raw)
     except (TypeError, ValueError):
-        return default
+        return int(default)
+
+def _env_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == '':
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -55,8 +69,10 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 TOKEN              = os.getenv('DISCORD_TOKEN')
-CREATE_ROOM_CHANNEL_ID = _env_int('CREATE_ROOM_CHANNEL_ID')
-TEMP_ROOM_CATEGORY_ID  = _env_int('TEMP_ROOM_CATEGORY_ID')
+DATABASE_URL       = os.getenv('DATABASE_URL', 'sqlite:///data/bot.db')
+LEGACY_CREATE_ROOM_CHANNEL_ID = _env_optional_int('CREATE_ROOM_CHANNEL_ID')
+LEGACY_TEMP_ROOM_CATEGORY_ID  = _env_optional_int('TEMP_ROOM_CATEGORY_ID')
+DEFAULT_GUILD_ID   = _env_optional_int('DEFAULT_GUILD_ID')
 GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
 GROQ_API_KEY       = os.getenv('GROQ_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
@@ -72,28 +88,15 @@ HUGGINGFACE_API_KEY = (
     or os.getenv('HF_TOKEN')
 )
 
-GEMINI_FLASH_MODEL      = os.getenv('GEMINI_FLASH_MODEL', 'gemini-2.5-flash')
-GEMINI_FLASH_LITE_MODEL = os.getenv('GEMINI_FLASH_LITE_MODEL', 'gemini-2.5-flash-lite')
+GEMINI_FLASH_MODEL      = os.getenv('GEMINI_FLASH_MODEL', 'gemini-3.5-flash')
+GEMINI_FLASH_LITE_MODEL = os.getenv('GEMINI_FLASH_LITE_MODEL', 'gemini-3.1-flash-lite')
 GROQ_MODELS             = os.getenv('GROQ_MODELS', 'llama-3.3-70b-versatile,qwen/qwen3-32b')
+AI_PROVIDER_ORDER       = os.getenv('AI_PROVIDER_ORDER', 'gemini,groq,openrouter,huggingface')
 OPENROUTER_MODEL        = os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-20b:free')
 HUGGINGFACE_MODEL       = os.getenv('HUGGINGFACE_MODEL', 'deepseek-ai/DeepSeek-R1:fastest')
 AI_HTTP_TIMEOUT         = max(1.0, _env_float('AI_HTTP_TIMEOUT', 45.0))
 AI_ONE_MESSAGE_LIMIT    = max(1, min(2000, _env_int('AI_ONE_MESSAGE_LIMIT', 1750) or 1750))
-AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 900) or 900)
-
-SERVERS = [
-    {
-        'voice_channels': [
-            1483271561036435660, 
-            1483301292427186358,
-            1489183048665923735, 
-            1489183241473626142, 
-            1489183303226621992
-        ],
-        'report_channel': 1483288436369653861,
-    },
-]
-
+AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1300) or 1300)
 
 WARN_BEFORE_KICK    = 10
 WAIT_SECONDS        = 60
@@ -135,6 +138,7 @@ BASE_DIR = _ensure_writable_base_dir()
 log_file_path = BASE_DIR / 'bot.log'
 DATA_FILE           = BASE_DIR / 'study_data.json'
 RUNTIME_STATE_FILE  = BASE_DIR / 'runtime_state.json'
+ROLE_CONFIG_FILE    = BASE_DIR / 'role_config.json'
 BACKUP_DIR          = BASE_DIR / 'backups'
 
 DASHBOARD_PORT      = _env_int('DASHBOARD_PORT', 5000)
@@ -176,6 +180,24 @@ LEVEL_ROLES: dict[int, int | None] = {
     9:  1493180024818372759,   # Vô Địch
     10: 1493180158562275390,   # Thần Học
 }
+
+CLASS_ROLE_NAMES: dict[int, str] = {
+    1: 'Class 1 Newbie',
+    2: 'Class 2 Student',
+    3: 'Class 3 Worker',
+    4: 'Class 4 Trader',
+    5: 'Class 5 Rich',
+    6: 'Class 6 Elite',
+    7: 'Class 7 Millionaire',
+    8: 'Class 8 Tycoon',
+    9: 'Class 9 Noble',
+    10: 'Class 10 Legend',
+}
+
+database = DatabaseService(DATABASE_URL)
+repository = BotRepository(database, default_coins_per_minute=COINS_PER_MINUTE)
+_database_initialized = False
+_guild_context: contextvars.ContextVar[int | None] = contextvars.ContextVar('guild_id', default=None)
 
 # ─── QUEST CONFIG ────────────────────────────────────────────────────────────
 
@@ -298,8 +320,6 @@ COIN_EARNING_MILESTONES = [1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000
 if not TOKEN:
     raise ValueError('Không tìm thấy DISCORD_TOKEN trong file .env!')
 
-STATIC_FOCUS_CHANNEL_IDS = tuple(ch for s in SERVERS for ch in s['voice_channels'])
-FOCUS_CHANNEL_IDS = list(STATIC_FOCUS_CHANNEL_IDS)
 backup_dir_warning: str | None = None
 
 # ✅ Ensure directories exist and are writable
@@ -342,12 +362,31 @@ intents.members         = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+def _capture_guild_context(guild_id: int | None):
+    if guild_id:
+        _guild_context.set(int(guild_id))
+
+
+async def _capture_app_command_guild_context(interaction: discord.Interaction) -> bool:
+    _capture_guild_context(interaction.guild_id)
+    return True
+
+bot.tree.interaction_check = _capture_app_command_guild_context
+
+
+@bot.before_invoke
+async def _capture_prefix_command_guild_context(ctx):
+    guild = getattr(ctx, 'guild', None)
+    _capture_guild_context(guild.id if guild else None)
+
+
 # ─── STATE ───────────────────────────────────────────────────────────────────
 
 pending_checks:       dict[int, asyncio.Task] = {}
 join_times:           dict[int, datetime]     = {}
 last_checkpoint:      dict[int, datetime]     = {}
 milestone_sent:       dict[int, set]          = {}
+runtime_member_guild_ids: dict[int, int]      = {}
 live_message_ids:     dict[int, int]          = {}
 daily_first_join:     dict[str, int]          = {}
 session_counts:       dict[int, int]          = {}
@@ -356,7 +395,7 @@ report_sent_today:    set                     = set()
 remind_tasks:         dict[int, tuple]        = {}
 media_active_members: set                     = set()
 cam_thanks_sent:     set[int]                 = set()
-temp_rooms:           dict[int, dict]         = {}
+temp_rooms:           dict[str, dict]         = {}
 temporary_room_delete_tasks: dict[int, asyncio.Task] = {}
 _role_sync_locks:     dict[int, asyncio.Lock] = {}
 _dashboard_started:   bool                    = False
@@ -380,91 +419,135 @@ def media_status_icon(vs: discord.VoiceState) -> str:
 
 # ─── DATA HELPERS ────────────────────────────────────────────────────────────
 
-def _load_data_unlocked() -> dict:
-    try:
-        if DATA_FILE.exists():
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-            return _normalize_all_users(loaded) if isinstance(loaded, dict) else {}
-    except (json.JSONDecodeError, IOError) as e:
-        log.error(f'Lỗi đọc data: {e}', exc_info=True)
-    except Exception as e:
-        log.error(f'Lỗi không xác định khi đọc data: {e}', exc_info=True)
-    return {}
+def initialize_database():
+    global _database_initialized
+    if _database_initialized:
+        return
+    repository.initialize()
+    _database_initialized = True
 
-def load_data() -> dict:
+
+def _current_guild_id(default: int | None = None) -> int:
+    guild_id = _guild_context.get()
+    if guild_id:
+        return int(guild_id)
+    if default:
+        return int(default)
+    if DEFAULT_GUILD_ID:
+        return int(DEFAULT_GUILD_ID)
+    if bot.guilds and len(bot.guilds) == 1:
+        return int(bot.guilds[0].id)
+    return 0
+
+
+@contextmanager
+def guild_data_context(guild_id: int | None):
+    token = _guild_context.set(int(guild_id) if guild_id else None)
+    try:
+        yield
+    finally:
+        _guild_context.reset(token)
+
+
+def get_guild_config(guild_id: int) -> dict:
+    initialize_database()
+    return repository.get_guild_config(int(guild_id))
+
+
+def set_guild_config(guild_id: int, key: str, value):
+    initialize_database()
+    return repository.set_guild_config(int(guild_id), key, value)
+
+
+def save_guild_config(guild_id: int, config: dict) -> dict:
+    initialize_database()
+    return repository.save_guild_config(int(guild_id), config)
+
+
+def require_guild_config(interaction_or_guild) -> tuple[dict | None, str | None]:
+    guild = getattr(interaction_or_guild, 'guild', interaction_or_guild)
+    if guild is None:
+        return None, 'Lệnh này chỉ dùng được trong server.'
+    config = get_guild_config(guild.id)
+    missing = [
+        label for key, label in (
+            ('create_room_channel_id', 'create-room voice channel'),
+            ('temp_room_category_id', 'temporary room category'),
+            ('report_channel_id', 'report channel'),
+        )
+        if not config.get(key)
+    ]
+    if missing:
+        return config, f'Chưa setup: {", ".join(missing)}. Dùng `/admin setup` trước.'
+    return config, None
+
+
+def _configured_guild_ids() -> set[int]:
+    initialize_database()
+    ids = {int(cfg['guild_id']) for cfg in repository.list_guild_configs()}
+    ids.update(guild.id for guild in bot.guilds)
+    return ids
+
+
+def coins_per_minute_for(guild_id: int | None = None) -> int:
+    gid = _guild_data_id(guild_id)
+    if not gid:
+        return COINS_PER_MINUTE
+    return max(0, _as_int(get_guild_config(gid).get('coins_per_minute'), COINS_PER_MINUTE))
+
+
+def _guild_data_id(guild_id: int | None = None) -> int:
+    return _current_guild_id(guild_id)
+
+
+# Synchronous data boundary shared by Discord tasks and the Flask dashboard.
+# Keep work inside _data_lock limited to local repository transactions only;
+# do not add network calls or long CPU work here, or async handlers can stall.
+def load_data(guild_id: int | None = None) -> dict:
+    initialize_database()
+    gid = _guild_data_id(guild_id)
+    if not gid:
+        return {}
     with _data_lock:
-        return _load_data_unlocked()
+        data = repository.load_guild_data(gid)
+        return _normalize_all_users(data)
 
-def _verify_saved_data_unlocked(expected: dict) -> bool:
-    try:
-        if not DATA_FILE.exists():
-            return False
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            loaded = json.load(f)
-        return isinstance(loaded, dict) and loaded == expected
-    except Exception as e:
-        log.error(f'Lỗi xác minh data sau khi lưu: {e}', exc_info=True)
-        return False
 
-def _save_data_unlocked(data: dict):
+def save_data(data: dict, guild_id: int | None = None):
     global _last_data_save_success
-    _last_data_save_success = False
-    last_error: Exception | None = None
-
-    for attempt in range(2):
-        temp_path: str | None = None
-        try:
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=DATA_FILE.parent,
-                prefix='.study_data_',
-                suffix='.json.tmp'
-            )
-
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-
-            Path(temp_path).replace(DATA_FILE)
-
-            if not _verify_saved_data_unlocked(data):
-                raise IOError('Xác minh dữ liệu sau khi lưu không khớp.')
-
-            _last_data_save_success = True
-            return
-        except Exception as e:
-            last_error = e
-            if temp_path is not None:
-                Path(temp_path).unlink(missing_ok=True)
-            if attempt == 0:
-                log.error(f'Lỗi lưu data (lần 1/2): {e}', exc_info=True)
-                continue
-
-    if isinstance(last_error, IOError):
-        log.critical(f'Lỗi lưu data nghiêm trọng: {last_error}', exc_info=True)
-        print(f'❌ SAVE ERROR: {last_error}', file=sys.stderr)
-    elif last_error is not None:
-        log.critical(f'Lỗi không xác định khi lưu data: {last_error}', exc_info=True)
-        print(f'❌ CRITICAL SAVE ERROR: {last_error}', file=sys.stderr)
-
-def save_data(data: dict):
+    initialize_database()
+    gid = _guild_data_id(guild_id)
+    if not gid:
+        log.error('[Data] Cannot save without guild context.')
+        _last_data_save_success = False
+        return
     with _data_lock:
+        _last_data_save_success = False
         _normalize_all_users(data)
-        _save_data_unlocked(data)
+        repository.save_guild_data(gid, data)
+        _last_data_save_success = True
 
-def update_data(mutator):
+
+def update_data(mutator, guild_id: int | None = None):
     """
-    Thread-safe update that persists changes atomically
+    Thread-safe DB-backed update that persists changes atomically
     and returns a deepcopy of the saved state.
     """
+    global _last_data_save_success
+    initialize_database()
+    gid = _guild_data_id(guild_id)
+    if not gid:
+        log.error('[Data] Cannot update without guild context.')
+        return mutator({}), {}
     with _data_lock:
-        data = _load_data_unlocked()
-        _normalize_all_users(data)
-        result = mutator(data)
-        _normalize_all_users(data)
-        _save_data_unlocked(data)
-        return result, deepcopy(data)
+        _last_data_save_success = False
+        result, data = repository.update_guild_data(gid, mutator, _normalize_all_users)
+        _last_data_save_success = True
+        return result, data
+
+
+def load_all_guild_data() -> dict[int, dict]:
+    return {guild_id: load_data(guild_id) for guild_id in _configured_guild_ids()}
 
 def _serialize_dt(dt: datetime) -> str:
     return dt.isoformat()
@@ -475,42 +558,62 @@ def _parse_dt(value: str) -> datetime | None:
     except Exception:
         return None
 
-def _serialize_temp_rooms_snapshot() -> dict:
+def _temp_room_key(guild_id: int, channel_id: int) -> str:
+    return f'{int(guild_id)}:{int(channel_id)}'
+
+def _temp_room_key_for_channel_id(channel_id: int | None, guild_id: int | None = None) -> str | None:
+    if not channel_id:
+        return None
+    if guild_id:
+        key = _temp_room_key(guild_id, channel_id)
+        if key in temp_rooms:
+            return key
+    for key, meta in list(temp_rooms.items()):
+        if _as_int(meta.get('room_id')) == int(channel_id):
+            if guild_id and _as_int(meta.get('guild_id')) != int(guild_id):
+                continue
+            return key
+    return None
+
+def _temp_room_meta(channel_id: int | None, guild_id: int | None = None) -> dict:
+    key = _temp_room_key_for_channel_id(channel_id, guild_id)
+    return temp_rooms.get(key, {}) if key else {}
+
+def _serialize_temp_rooms_snapshot(guild_id: int | None = None) -> dict:
     snapshot: dict[str, dict] = {}
-    for room_id, meta in list(temp_rooms.items()):
-        if room_id in STATIC_FOCUS_CHANNEL_IDS:
+    for key, meta in list(temp_rooms.items()):
+        room_id = _as_int(meta.get('room_id'))
+        room_guild_id = _as_int(meta.get('guild_id'))
+        if guild_id and room_guild_id != int(guild_id):
+            continue
+        if not room_id or not room_guild_id:
             continue
         created_at = meta.get('created_at')
         if isinstance(created_at, datetime):
             created_at_str = _serialize_dt(created_at)
         else:
             created_at_str = str(created_at or '')
-        snapshot[str(room_id)] = {
+        snapshot[key] = {
             'room_id': room_id,
             'owner_id': _as_int(meta.get('owner_id')),
-            'guild_id': _as_int(meta.get('guild_id')),
+            'guild_id': room_guild_id,
             'created_at': created_at_str,
         }
     return snapshot
 
-def _restore_temp_rooms_from_snapshot(raw: dict):
+def _restore_temp_rooms_from_snapshot(raw: dict, guild_id: int | None = None):
     restored = 0
-    temp_rooms.clear()
-    FOCUS_CHANNEL_IDS[:] = list(STATIC_FOCUS_CHANNEL_IDS)
 
     rooms = raw.get('temp_rooms', {}) if isinstance(raw, dict) else {}
     if not isinstance(rooms, dict):
         return
 
-    for room_id_str, meta in rooms.items():
+    for room_key, meta in rooms.items():
         if not isinstance(meta, dict):
             continue
         try:
-            room_id = int(room_id_str)
+            room_id = int(str(room_key).split(':')[-1])
         except (TypeError, ValueError):
-            continue
-        if room_id in STATIC_FOCUS_CHANNEL_IDS:
-            log.warning(f'[TempRoom] Ignoring temp room state for static focus channel {room_id}')
             continue
 
         channel = bot.get_channel(room_id)
@@ -518,86 +621,159 @@ def _restore_temp_rooms_from_snapshot(raw: dict):
             continue
 
         created_at = _parse_dt(str(meta.get('created_at', ''))) or datetime.now()
-        temp_rooms[room_id] = {
+        room_guild_id = _as_int(meta.get('guild_id'), guild_id or channel.guild.id)
+        if guild_id and room_guild_id != int(guild_id):
+            continue
+        temp_rooms[_temp_room_key(room_guild_id, room_id)] = {
             'room_id': room_id,
             'owner_id': _as_int(meta.get('owner_id')),
-            'guild_id': _as_int(meta.get('guild_id', channel.guild.id)),
+            'guild_id': room_guild_id,
             'created_at': created_at,
         }
-        if room_id not in FOCUS_CHANNEL_IDS:
-            FOCUS_CHANNEL_IDS.append(room_id)
         restored += 1
 
     if restored:
         log.info(f'[TempRoom] Restored {restored} tracked temporary rooms.')
 
-def save_runtime_state():
-    now = datetime.now()
-    snapshot = {
+def _runtime_guild_id_for_member(member_id: int) -> int | None:
+    member_id = int(member_id)
+    guild_id = runtime_member_guild_ids.get(member_id)
+    if guild_id:
+        return int(guild_id)
+
+    for guild in bot.guilds:
+        member = guild.get_member(member_id)
+        if member and member.voice and member.voice.channel:
+            runtime_member_guild_ids[member_id] = guild.id
+            return guild.id
+
+    for guild in bot.guilds:
+        if guild.get_member(member_id):
+            runtime_member_guild_ids[member_id] = guild.id
+            return guild.id
+    return None
+
+def _runtime_member_ids_for_guild(guild_id: int) -> set[int]:
+    ids = set(join_times.keys())
+    ids.update(last_checkpoint.keys())
+    ids.update(milestone_sent.keys())
+    ids.update(media_active_members)
+    ids.update(session_counts.keys())
+    ids.update(mid for mid in daily_first_join.values() if isinstance(mid, int))
+    return {
+        int(mid)
+        for mid in ids
+        if _runtime_guild_id_for_member(int(mid)) == int(guild_id)
+    }
+
+def _runtime_guild_ids_for_save() -> set[int]:
+    guild_ids: set[int] = set()
+    try:
+        guild_ids.update(_configured_guild_ids())
+    except Exception as e:
+        log.error(f'[Runtime] Could not read configured guild ids: {e}', exc_info=True)
+    guild_ids.update(int(gid) for gid in runtime_member_guild_ids.values() if gid)
+    for meta in temp_rooms.values():
+        guild_id = _as_int(meta.get('guild_id'))
+        if guild_id:
+            guild_ids.add(guild_id)
+    for member_id in set(join_times) | set(last_checkpoint) | set(milestone_sent) | set(media_active_members):
+        guild_id = _runtime_guild_id_for_member(member_id)
+        if guild_id:
+            guild_ids.add(guild_id)
+    return {int(gid) for gid in guild_ids if gid}
+
+def _runtime_snapshot_for_guild(guild_id: int, now: datetime) -> dict:
+    member_ids = _runtime_member_ids_for_guild(guild_id)
+    return {
+        'guild_id': int(guild_id),
         'saved_at': now.strftime('%Y-%m-%d'),
         'saved_at_ts': _serialize_dt(now),
-        'join_times': {str(mid): _serialize_dt(ts) for mid, ts in join_times.items()},
-        'last_checkpoint': {str(mid): _serialize_dt(ts) for mid, ts in last_checkpoint.items()},
-        'milestone_sent': {str(mid): sorted(list(ms)) for mid, ms in milestone_sent.items()},
-        'daily_first_join': {d: int(mid) for d, mid in daily_first_join.items()},
-        'session_counts': {str(mid): int(cnt) for mid, cnt in session_counts.items()},
-        'media_active_members': sorted(list(media_active_members)),
-        'temp_rooms': _serialize_temp_rooms_snapshot(),
+        'join_times': {
+            str(mid): _serialize_dt(ts)
+            for mid, ts in join_times.items()
+            if mid in member_ids
+        },
+        'last_checkpoint': {
+            str(mid): _serialize_dt(ts)
+            for mid, ts in last_checkpoint.items()
+            if mid in member_ids
+        },
+        'milestone_sent': {
+            str(mid): sorted(list(ms))
+            for mid, ms in milestone_sent.items()
+            if mid in member_ids
+        },
+        'daily_first_join': {
+            d: int(mid)
+            for d, mid in daily_first_join.items()
+            if isinstance(mid, int) and mid in member_ids
+        },
+        'session_counts': {
+            str(mid): int(cnt)
+            for mid, cnt in session_counts.items()
+            if mid in member_ids
+        },
+        'media_active_members': sorted(mid for mid in media_active_members if mid in member_ids),
+        'temp_rooms': _serialize_temp_rooms_snapshot(guild_id),
     }
+
+def save_runtime_state() -> bool:
+    now = datetime.now()
     with _runtime_lock:
-        temp_path: str | None = None
         try:
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=RUNTIME_STATE_FILE.parent,
-                prefix='.runtime_state_',
-                suffix='.json.tmp'
-            )
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(snapshot, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            Path(temp_path).replace(RUNTIME_STATE_FILE)
+            initialize_database()
+            guild_ids = _runtime_guild_ids_for_save()
+            if not guild_ids:
+                log.debug('[Runtime] No guilds available for runtime snapshot.')
+                return True
+            for guild_id in sorted(guild_ids):
+                repository.save_runtime_state(guild_id, _runtime_snapshot_for_guild(guild_id, now))
+            return True
+        except sqlite3.OperationalError as e:
+            log.error(f'[Runtime] SQLite operational error while saving runtime state: {e}', exc_info=True)
+        except sqlite3.DatabaseError as e:
+            log.error(f'[Runtime] SQLite database error while saving runtime state: {e}', exc_info=True)
         except IOError as e:
-            log.error(f'Lỗi lưu runtime state: {e}')
-            if temp_path is not None:
-                Path(temp_path).unlink(missing_ok=True)
+            log.error(f'Lỗi lưu runtime state: {e}', exc_info=True)
         except Exception as e:
             log.error(f'Lỗi không xác định khi lưu runtime state: {e}', exc_info=True)
-            if temp_path is not None:
-                Path(temp_path).unlink(missing_ok=True)
+    return False
 
-def load_runtime_state() -> dict:
-    """✅ FIX: Use Path for runtime state file"""
+def load_runtime_states() -> dict[int, dict]:
     with _runtime_lock:
+        try:
+            initialize_database()
+            states = repository.load_runtime_states()
+            real_states = {gid: state for gid, state in states.items() if gid}
+            if real_states:
+                return real_states
+            if 0 in states:
+                return {0: states[0]}
+        except Exception as e:
+            log.error(f'Lỗi đọc runtime state từ DB: {e}', exc_info=True)
+
         try:
             if RUNTIME_STATE_FILE.exists():
                 with open(RUNTIME_STATE_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    return {0: json.load(f)}
         except (json.JSONDecodeError, IOError) as e:
             log.error(f'Lỗi đọc runtime state: {e}')
     return {}
 
+def load_runtime_state() -> dict:
+    states = load_runtime_states()
+    if 0 in states:
+        return states[0]
+    return next(iter(states.values()), {})
+
 def restore_runtime_state():
-    raw = load_runtime_state()
-    if not raw:
+    states = load_runtime_states()
+    if not states:
         return
 
     now = datetime.now()
     today = now.strftime('%Y-%m-%d')
-    saved_at = raw.get('saved_at')
-    same_day = saved_at == today
-    saved_at_ts = _parse_dt(str(raw.get('saved_at_ts', '')))
-    session_restore_allowed = same_day
-    if saved_at_ts is not None:
-        age_seconds = (now - saved_at_ts).total_seconds()
-        session_restore_allowed = 0 <= age_seconds <= RUNTIME_RESTORE_MAX_AGE_SECONDS
-    elif not same_day:
-        session_restore_allowed = False
-
-    _restore_temp_rooms_from_snapshot(raw)
-
-    if not session_restore_allowed:
-        log.info('[Runtime] Stored voice sessions are stale; current voice members will start fresh.')
 
     restored_join: dict[int, datetime] = {}
     restored_checkpoint: dict[int, datetime] = {}
@@ -606,7 +782,50 @@ def restore_runtime_state():
     restored_sessions: dict[int, int] = {}
     restored_first_join: dict[str, int] = {}
 
-    if session_restore_allowed:
+    temp_rooms.clear()
+    runtime_member_guild_ids.clear()
+
+    for source_guild_id, raw in states.items():
+        if not isinstance(raw, dict):
+            continue
+        guild_id = None if source_guild_id == 0 else int(source_guild_id)
+        saved_at = raw.get('saved_at')
+        same_day = saved_at == today
+        saved_at_ts = _parse_dt(str(raw.get('saved_at_ts', '')))
+        session_restore_allowed = same_day
+        if saved_at_ts is not None:
+            age_seconds = (now - saved_at_ts).total_seconds()
+            session_restore_allowed = 0 <= age_seconds <= RUNTIME_RESTORE_MAX_AGE_SECONDS
+        elif not same_day:
+            session_restore_allowed = False
+
+        _restore_temp_rooms_from_snapshot(raw, guild_id)
+
+        if not session_restore_allowed:
+            log.info(f'[Runtime] Stored voice sessions are stale for guild_id={source_guild_id}; current voice members will start fresh.')
+
+        local_join: dict[int, datetime] = {}
+        local_checkpoint: dict[int, datetime] = {}
+
+        if not session_restore_allowed:
+            if same_day:
+                for mid_str, cnt in raw.get('session_counts', {}).items():
+                    try:
+                        mid = int(mid_str)
+                        cnt_i = int(cnt)
+                    except (ValueError, TypeError):
+                        continue
+                    if cnt_i > 0:
+                        restored_sessions[mid] = cnt_i
+                        if guild_id:
+                            runtime_member_guild_ids[mid] = guild_id
+                for d, mid in raw.get('daily_first_join', {}).items():
+                    if isinstance(d, str) and isinstance(mid, int):
+                        restored_first_join[d] = mid
+                        if guild_id:
+                            runtime_member_guild_ids[mid] = guild_id
+            continue
+
         for mid_str, ts_str in raw.get('join_times', {}).items():
             try:
                 mid = int(mid_str)
@@ -617,55 +836,63 @@ def restore_runtime_state():
                 continue
             if ts > now:
                 ts = now
+            local_join[mid] = ts
             restored_join[mid] = ts
+            if guild_id:
+                runtime_member_guild_ids[mid] = guild_id
 
         for mid_str, ts_str in raw.get('last_checkpoint', {}).items():
             try:
                 mid = int(mid_str)
             except (ValueError, TypeError):
                 continue
-            if mid not in restored_join:
+            if mid not in local_join:
                 continue
             ts = _parse_dt(ts_str)
             if ts is None:
                 continue
-            if ts < restored_join[mid]:
-                ts = restored_join[mid]
+            if ts < local_join[mid]:
+                ts = local_join[mid]
             if ts > now:
                 ts = now
+            local_checkpoint[mid] = ts
             restored_checkpoint[mid] = ts
 
-        for mid in restored_join:
-            restored_checkpoint.setdefault(mid, restored_join[mid])
+        for mid in local_join:
+            restored_checkpoint.setdefault(mid, local_join[mid])
 
-    for mid_str, vals in raw.get('milestone_sent', {}).items():
-        try:
-            mid = int(mid_str)
-        except (ValueError, TypeError):
-            continue
-        if mid not in restored_join:
-            continue
-        if not isinstance(vals, list):
-            continue
-        clean = {int(v) for v in vals if isinstance(v, int)}
-        restored_milestones[mid] = clean
-
-    for mid in raw.get('media_active_members', []):
-        if isinstance(mid, int) and mid in restored_join:
-            restored_media.add(mid)
-
-    if same_day:
-        for mid_str, cnt in raw.get('session_counts', {}).items():
+        for mid_str, vals in raw.get('milestone_sent', {}).items():
             try:
                 mid = int(mid_str)
-                cnt_i = int(cnt)
             except (ValueError, TypeError):
                 continue
-            if cnt_i > 0:
-                restored_sessions[mid] = cnt_i
-        for d, mid in raw.get('daily_first_join', {}).items():
-            if isinstance(d, str) and isinstance(mid, int):
-                restored_first_join[d] = mid
+            if mid not in restored_join:
+                continue
+            if not isinstance(vals, list):
+                continue
+            clean = {int(v) for v in vals if isinstance(v, int)}
+            restored_milestones[mid] = clean
+
+        for mid in raw.get('media_active_members', []):
+            if isinstance(mid, int) and mid in restored_join:
+                restored_media.add(mid)
+
+        if same_day:
+            for mid_str, cnt in raw.get('session_counts', {}).items():
+                try:
+                    mid = int(mid_str)
+                    cnt_i = int(cnt)
+                except (ValueError, TypeError):
+                    continue
+                if cnt_i > 0:
+                    restored_sessions[mid] = cnt_i
+                    if guild_id:
+                        runtime_member_guild_ids[mid] = guild_id
+            for d, mid in raw.get('daily_first_join', {}).items():
+                if isinstance(d, str) and isinstance(mid, int):
+                    restored_first_join[d] = mid
+                    if guild_id:
+                        runtime_member_guild_ids[mid] = guild_id
 
     join_times.clear()
     join_times.update(restored_join)
@@ -681,21 +908,16 @@ def restore_runtime_state():
     daily_first_join.update(restored_first_join)
 
     log.info(
-        f'[Runtime] Restored {len(join_times)} phiên, '
+        f'[Runtime] Restored {len(join_times)} phiên across {len(states)} snapshot(s), '
         f'{len(media_active_members)} đang active media.'
     )
 
 def backup_data():
-    """✅ FIX: Use Path for backup operations"""
-    if not DATA_FILE.exists():
-        return
     BACKUP_DIR.mkdir(exist_ok=True, parents=True)
-    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
-    dest = BACKUP_DIR / f'study_data_{ts}.json'
     try:
-        shutil.copy2(DATA_FILE, dest)
+        dest = repository.backup_db(BACKUP_DIR)
         files = sorted(
-            BACKUP_DIR.glob('study_data_*.json'),
+            BACKUP_DIR.glob('bot_db_*.sqlite3'),
             key=lambda p: p.stat().st_mtime
         )
         for old in files[:-30]:
@@ -902,33 +1124,6 @@ def _claim_user_notifications(user_id: int, field: str, keys: list[str], name: s
     newly_claimed, _ = update_data(mutator)
     return newly_claimed or []
 
-async def send_private_notify_embed(
-    member: discord.Member,
-    title: str,
-    description: str,
-    color: int = NOTIFY_BLUE,
-    footer: str = 'One percent better every day',
-    respect_user_setting: bool = True,
-):
-    if respect_user_setting and not notifications_enabled_for(member.id):
-        return
-
-    now = datetime.now()
-    embed = discord.Embed(
-        title=title,
-        description=_compact_notice_description(description),
-        color=color,
-        timestamp=now,
-    )
-    embed.set_footer(text=f'{footer} • Today at {now:%H:%M}')
-
-    try:
-        await member.send(embed=embed)
-    except discord.Forbidden:
-        log.info(f'Cannot DM notification to {member} ({member.id}). User may have DMs closed.')
-    except Exception as e:
-        log.warning(f'Failed to send DM notification to {member.id}: {e}')
-
 _NOTICE_EMOJI_RE = re.compile(r'[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]')
 
 def _compact_notice_description(message: str) -> str:
@@ -940,6 +1135,74 @@ def _compact_notice_description(message: str) -> str:
     text = re.sub(r' *\n *', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip() or 'Thông báo từ BetterMe.'
+
+def build_compact_notice_embed(
+    title: str,
+    description: str,
+    color: int,
+    footer_prefix: str = 'One percent better every day',
+) -> discord.Embed:
+    now = datetime.now()
+    embed = discord.Embed(
+        title=str(title or 'Thông báo').strip(),
+        description=_compact_notice_description(description),
+        color=color,
+    )
+    embed.set_footer(text=f'{footer_prefix} • Today at {now:%H:%M}')
+    return embed
+
+async def send_voice_notice(
+    channel: discord.abc.Messageable,
+    member: discord.Member,
+    title: str,
+    description: str,
+    color: int,
+    footer_prefix: str = 'One percent better every day',
+):
+    if not notifications_enabled_for(member.id):
+        return
+    if channel is None:
+        log.info(f'Cannot send notice to voice channel chat for {member} ({member.id}): no channel')
+        return
+
+    embed = build_compact_notice_embed(
+        title=title,
+        description=description,
+        color=color,
+        footer_prefix=footer_prefix,
+    )
+
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        log.info(f'Cannot send notice to voice channel chat: {getattr(channel, "id", None)}')
+    except Exception as e:
+        log.warning(f'Failed to send voice notice: {e}')
+
+async def send_private_notify_embed(
+    member: discord.Member,
+    title: str,
+    description: str,
+    color: int = NOTIFY_BLUE,
+    footer: str = 'One percent better every day',
+    respect_user_setting: bool = True,
+):
+    if respect_user_setting and not notifications_enabled_for(member.id):
+        return
+
+    embed = build_compact_notice_embed(
+        title=title,
+        description=description,
+        color=color,
+        footer_prefix=footer,
+    )
+
+    try:
+        await member.send(embed=embed)
+    except discord.Forbidden:
+        log.info(f'Cannot DM notification to {member} ({member.id}). User may have DMs closed.')
+    except Exception as e:
+        log.warning(f'Failed to send DM notification to {member.id}: {e}')
 
 def _notice_title_color_from_text(message: str) -> tuple[str, int]:
     text = str(message or '').lower()
@@ -967,11 +1230,36 @@ def _notice_title_color_from_text(message: str) -> tuple[str, int]:
 def reset_cam_notification(member_id: int):
     cam_thanks_sent.discard(member_id)
 
+def _focus_notice_channel(channel):
+    if channel and is_focus_channel(getattr(channel, 'id', None)) and hasattr(channel, 'send'):
+        return channel
+    return None
+
+def _current_voice_notice_channel(member: discord.Member):
+    voice_channel = getattr(getattr(member, 'voice', None), 'channel', None)
+    return _focus_notice_channel(voice_channel)
+
+def _resolve_voice_notice_channel(
+    member: discord.Member,
+    channel=None,
+    *,
+    allow_current: bool = True,
+):
+    return _focus_notice_channel(channel) or (
+        _current_voice_notice_channel(member) if allow_current else None
+    )
+
 async def notify_cam_started(member: discord.Member, channel=None):
+    if not notifications_enabled_for(member.id):
+        return
     if member.id in cam_thanks_sent:
         return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     cam_thanks_sent.add(member.id)
-    await send_private_notify_embed(
+    await send_voice_notice(
+        channel=notice_channel,
         member=member,
         title='Cảm ơn',
         description=f'{member.display_name}, cảm ơn bạn đã bật Cam hoặc Stream.',
@@ -979,18 +1267,60 @@ async def notify_cam_started(member: discord.Member, channel=None):
     )
 
 async def notify_class_up(member: discord.Member, channel, new_class: str):
+    if not notifications_enabled_for(member.id):
+        return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     key = str(new_class)
     if not _claim_user_notification(member.id, 'notified_classes', key, member.display_name):
         return
-    await send_private_notify_embed(
+    await send_voice_notice(
+        channel=notice_channel,
         member=member,
         title='Chúc mừng',
         description=f'Bạn đã đạt được hạng **{new_class}**.',
         color=NOTIFY_GOLD,
-        footer='Tiếp tục giữ phong độ nhé.',
+        footer_prefix='Tiếp tục giữ phong độ nhé.',
+    )
+
+async def notify_live_session_milestones(member: discord.Member, channel=None):
+    if not notifications_enabled_for(member.id):
+        return
+    joined_at = join_times.get(member.id)
+    if joined_at is None:
+        return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
+
+    elapsed_minutes = max(0, int((datetime.now() - joined_at).total_seconds() // 60))
+    sent = milestone_sent.setdefault(member.id, set())
+    reached = [minute for minute in MILESTONE_MINUTES if elapsed_minutes >= minute and minute not in sent]
+    if not reached:
+        return
+
+    minute = reached[-1]
+    sent.update(reached)
+    save_runtime_state()
+    message = MILESTONE_DM.get(
+        minute,
+        f'Bạn đã học được **{minute} phút** trong phiên này. Tiếp tục giữ nhịp nhé!',
+    )
+    await send_voice_notice(
+        channel=notice_channel,
+        member=member,
+        title='Cột mốc phiên học',
+        description=message,
+        color=NOTIFY_GOLD,
     )
 
 async def notify_study_milestones(member: discord.Member, channel=None):
+    if not notifications_enabled_for(member.id):
+        return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     uid = str(member.id)
     data = load_data()
     info = data.get(uid)
@@ -1014,7 +1344,8 @@ async def notify_study_milestones(member: discord.Member, channel=None):
         (label for _, key, label in STUDY_MILESTONE_SECONDS if key == highest_key),
         highest_key,
     )
-    await send_private_notify_embed(
+    await send_voice_notice(
+        channel=notice_channel,
         member=member,
         title='Chúc mừng',
         description=(
@@ -1025,6 +1356,11 @@ async def notify_study_milestones(member: discord.Member, channel=None):
     )
 
 async def notify_coin_milestones(member: discord.Member, channel=None):
+    if not notifications_enabled_for(member.id):
+        return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     uid = str(member.id)
     data = load_data()
     info = data.get(uid)
@@ -1041,12 +1377,13 @@ async def notify_coin_milestones(member: discord.Member, channel=None):
     if not newly_claimed:
         return
     amount = _as_int(newly_claimed[-1])
-    await send_private_notify_embed(
+    await send_voice_notice(
+        channel=notice_channel,
         member=member,
         title='Cột mốc kinh tế',
         description=f'Bạn đã kiếm tổng cộng **{format_coins(amount)}**.',
         color=NOTIFY_PURPLE,
-        footer='Economy System',
+        footer_prefix='Economy System',
     )
 
 async def notify_loan_event(
@@ -1056,18 +1393,35 @@ async def notify_loan_event(
     amount: int,
     detail: str,
 ):
+    description = (
+        f'Số tiền: `{format_coins(amount)}`\n'
+        f'{detail}'
+    )
+    notice_channel = _resolve_voice_notice_channel(member, channel, allow_current=False)
+    if notice_channel:
+        await send_voice_notice(
+            channel=notice_channel,
+            member=member,
+            title=title,
+            description=description,
+            color=NOTIFY_PURPLE,
+            footer_prefix='Economy System',
+        )
+        return
     await send_private_notify_embed(
         member=member,
         title=title,
-        description=(
-            f'Số tiền: `{format_coins(amount)}`\n'
-            f'{detail}'
-        ),
+        description=description,
         color=NOTIFY_PURPLE,
         footer='Economy System',
     )
 
 async def notify_overdue_loans(member: discord.Member, channel=None):
+    if not notifications_enabled_for(member.id):
+        return
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     uid = str(member.id)
     data = load_data()
     info = data.get(uid)
@@ -1100,7 +1454,8 @@ async def notify_overdue_loans(member: discord.Member, channel=None):
     if len(new_loans) > 5:
         loan_lines.append(f'Còn {len(new_loans) - 5} khoản quá hạn khác.')
 
-    await send_private_notify_embed(
+    await send_voice_notice(
+        channel=notice_channel,
         member=member,
         title='Khoản vay quá hạn',
         description=(
@@ -1108,8 +1463,43 @@ async def notify_overdue_loans(member: discord.Member, channel=None):
             + '\n'.join(loan_lines)
         ),
         color=NOTIFY_RED,
-        footer='Economy System',
+        footer_prefix='Economy System',
     )
+
+async def send_private_session_summary(
+    member: discord.Member,
+    session_time: str,
+    today_time: str,
+    earned_today: int,
+    balance: int,
+    debt: int,
+    class_name: str,
+    total_earned: int,
+    streak: int,
+):
+    if not notifications_enabled_for(member.id):
+        return
+
+    description = (
+        f'Phiên này: `{session_time}`\n'
+        f'Hôm nay: `{today_time}`\n'
+        f'Earned hôm nay: `{format_coins(earned_today)}`\n'
+        f'Balance: `{format_coins(balance)}` · Debt: `{format_coins(debt)}`\n'
+        f'Class: `{class_name}` · Total earned: `{format_coins(total_earned)}`\n'
+        f'Streak: `{streak} ngày`'
+    )
+    embed = build_compact_notice_embed(
+        title='Phiên học kết thúc',
+        description=description,
+        color=NOTIFY_GREEN,
+    )
+
+    try:
+        await member.send(embed=embed)
+    except discord.Forbidden:
+        log.info(f'Cannot DM session summary to {member} ({member.id})')
+    except Exception as e:
+        log.warning(f'Failed to DM session summary to {member.id}: {e}')
 
 async def notify_session_finished(
     member: discord.Member,
@@ -1122,27 +1512,29 @@ async def notify_session_finished(
     total_earned: int,
     streak: int,
 ):
-    await send_private_notify_embed(
+    await send_private_session_summary(
         member=member,
-        title='Phiên học kết thúc',
-        description=(
-            f'Phiên này: `{session_time}`\n'
-            f'Hôm nay: `{today_time}`\n'
-            f'Earned hôm nay: `{format_coins(earned_today)}`\n'
-            f'Balance: `{format_coins(balance)}` · Debt: `{format_coins(debt)}`\n'
-            f'Class: `{current_class}` · Total earned: `{format_coins(total_earned)}`\n'
-            f'Streak: `{streak} ngày`'
-        ),
-        color=NOTIFY_GREEN,
+        session_time=session_time,
+        today_time=today_time,
+        earned_today=earned_today,
+        balance=balance,
+        debt=debt,
+        class_name=current_class,
+        total_earned=total_earned,
+        streak=streak,
     )
 
 async def _handle_progress_notifications(member: discord.Member, result: dict | None = None, channel=None):
     result = result or {}
+    notice_channel = _resolve_voice_notice_channel(member, channel)
+    if not notice_channel:
+        return
     if result.get('level_up'):
-        await notify_class_up(member, channel, class_label(result['new_level']))
-    await notify_study_milestones(member, channel)
-    await notify_coin_milestones(member, channel)
-    await notify_overdue_loans(member, channel)
+        await notify_class_up(member, notice_channel, class_label(result['new_level']))
+    await notify_live_session_milestones(member, notice_channel)
+    await notify_study_milestones(member, notice_channel)
+    await notify_coin_milestones(member, notice_channel)
+    await notify_overdue_loans(member, notice_channel)
 
 def _new_id(prefix: str) -> str:
     stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
@@ -1548,27 +1940,36 @@ def _default_progress_result() -> dict:
         'today_seconds': 0,
     }
 
-def _get_live_enriched_data() -> dict:
-    data = load_data()
+def _get_live_enriched_data(guild: discord.Guild | None = None) -> dict:
+    data = load_data(guild.id if guild else None)
     for mid in list(join_times.keys()):
+        if guild:
+            member = guild.get_member(mid)
+            if not member:
+                continue
+        else:
+            member = None
         uid = str(mid)
         if uid in data:
             continue
         name = f'User {mid}'
-        for guild in bot.guilds:
-            m = guild.get_member(mid)
-            if m:
-                name = m.display_name
-                break
+        if member:
+            name = member.display_name
+        else:
+            for known_guild in bot.guilds:
+                m = known_guild.get_member(mid)
+                if m:
+                    name = m.display_name
+                    break
         data[uid] = _default_user(name)
     return data
 
 def get_report_channel_for(member: discord.Member):
-    guild_id = member.guild.id
-    for server in SERVERS:
-        ch = bot.get_channel(server['report_channel'])
-        if ch and ch.guild.id == guild_id:
-            return ch
+    config = get_guild_config(member.guild.id)
+    channel_id = config.get('report_channel_id')
+    ch = bot.get_channel(channel_id) if channel_id else None
+    if ch and getattr(ch, 'guild', None) and ch.guild.id == member.guild.id:
+        return ch
     return None
 
 def _split_seconds_by_day(start_time: datetime, end_time: datetime) -> list[tuple[str, int]]:
@@ -1675,6 +2076,7 @@ def add_study_time(
     if not day_parts:
         return {}
     uid   = str(member_id)
+    coins_per_minute = coins_per_minute_for()
 
     def mutator(data: dict):
         if uid not in data:
@@ -1688,7 +2090,7 @@ def add_study_time(
             data[uid]['daily'][day_key] = data[uid]['daily'].get(day_key, 0) + day_seconds
             data[uid]['total'] = data[uid].get('total', 0) + day_seconds
             coin_acc = data[uid].get('coins_acc_secs', 0) + day_seconds
-            coins_earned = (coin_acc // 60) * COINS_PER_MINUTE
+            coins_earned = (coin_acc // 60) * coins_per_minute
             data[uid]['coins_acc_secs'] = coin_acc % 60
             streak, is_new_day = _update_streak(data, uid, day_key)
             if is_new_day and streak > 1:
@@ -1929,6 +2331,10 @@ def format_badges(badge_ids: list) -> str:
 
 # ─── PROFILE CARD ─────────────────────────────────────────────────────────────
 
+PROFILE_CARD_W = 900
+PROFILE_CARD_H = 560
+
+
 def _try_font(paths: list[str], size: int):
     for p in paths:
         try:
@@ -1937,123 +2343,645 @@ def _try_font(paths: list[str], size: int):
             pass
     return ImageFont.load_default()
 
-def _draw_rounded_rect(draw, xy, radius, fill=None, outline=None, width=1):
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=fill, outline=outline, width=width)
 
-def generate_profile_card(member_id: int) -> bytes | None:
+def _card_font(size: int, bold: bool = False):
+    return _try_font([
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/System/Library/Fonts/Helvetica.ttc',
+        'C:/Windows/Fonts/arialbd.ttf' if bold else 'C:/Windows/Fonts/arial.ttf',
+    ], size)
+
+
+def _draw_rounded_rect(draw, xy, radius, fill=None, outline=None, width=1):
+    draw.rounded_rectangle(list(xy), radius=radius, fill=fill, outline=outline, width=width)
+
+
+def _profile_card_text_width(draw, text: str, font) -> int:
+    bbox = draw.textbbox((0, 0), str(text), font=font)
+    return bbox[2] - bbox[0]
+
+
+def _fit_profile_card_text(draw, text: str, font, max_width: int) -> str:
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    if not text or _profile_card_text_width(draw, text, font) <= max_width:
+        return text
+
+    suffix = '...'
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + suffix
+        if _profile_card_text_width(draw, candidate, font) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + suffix
+
+
+def _wrap_profile_card_text(draw, text: str, font, max_width: int, max_lines: int) -> list[str]:
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    if not text:
+        return []
+
+    lines: list[str] = []
+    for paragraph in textwrap.wrap(text, width=90) or [text]:
+        current = ''
+        for word in paragraph.split():
+            candidate = f'{current} {word}'.strip()
+            if _profile_card_text_width(draw, candidate, font) <= max_width:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = word
+            else:
+                lines.append(_fit_profile_card_text(draw, word, font, max_width))
+                current = ''
+            if len(lines) >= max_lines:
+                break
+        if current and len(lines) < max_lines:
+            lines.append(current)
+        if len(lines) >= max_lines:
+            break
+
+    if len(lines) == max_lines and _profile_card_text_width(draw, lines[-1], font) > max_width:
+        lines[-1] = _fit_profile_card_text(draw, lines[-1], font, max_width)
+    return lines[:max_lines]
+
+
+def _profile_card_compact_number(value: int | float) -> str:
+    number = _as_int(value)
+    sign = '-' if number < 0 else ''
+    number = abs(number)
+    for suffix, threshold in (('B', 1_000_000_000), ('M', 1_000_000), ('K', 1_000)):
+        if number >= threshold:
+            compact = number / threshold
+            text = f'{compact:.1f}'.rstrip('0').rstrip('.')
+            return f'{sign}{text}{suffix}'
+    return f'{sign}{number:,}'
+
+
+def _profile_card_rank(uid: str, data: dict) -> int | None:
+    ranked = sorted(
+        (
+            (user_id, _as_int(info.get('total_earned', 0)))
+            for user_id, info in data.items()
+            if isinstance(info, dict)
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    for index, (user_id, _) in enumerate(ranked, start=1):
+        if user_id == uid:
+            return index
+    return None
+
+
+def _profile_card_resize_cover(img, size: tuple[int, int]):
+    target_w, target_h = size
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        return Image.new('RGB', size, (15, 23, 42))
+
+    scale = max(target_w / src_w, target_h / src_h)
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS
+    resized = img.resize((max(1, int(src_w * scale)), max(1, int(src_h * scale))), resample)
+    left = max(0, (resized.width - target_w) // 2)
+    top = max(0, (resized.height - target_h) // 2)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
+def _profile_card_gradient_background(width: int, height: int):
+    img = Image.new('RGB', (width, height), (10, 15, 28))
+    draw = ImageDraw.Draw(img)
+    for y in range(height):
+        t = y / max(1, height - 1)
+        r = int(11 + 28 * t)
+        g = int(18 + 28 * t)
+        b = int(35 + 55 * t)
+        draw.line((0, y, width, y), fill=(r, g, b))
+
+    for _ in range(130):
+        x = random.randint(0, width - 1)
+        y = random.randint(0, int(height * 0.65))
+        alpha = random.randint(28, 70)
+        color = (80 + alpha, 100 + alpha, 150 + alpha)
+        draw.point((x, y), fill=color)
+    return img
+
+
+def _profile_card_background(width: int, height: int):
+    candidates = [
+        os.getenv('PROFILE_CARD_BACKGROUND', '').strip(),
+        str(BASE_DIR / 'profile_card_bg.png'),
+        str(BASE_DIR / 'profile_card_bg.jpg'),
+    ]
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        if not path.exists():
+            continue
+        try:
+            return _profile_card_resize_cover(Image.open(path).convert('RGB'), (width, height))
+        except Exception as e:
+            log.warning(f'Failed to load profile card background {path}: {e}')
+    return _profile_card_gradient_background(width, height)
+
+
+def _profile_card_avatar(avatar_url: str | None, display_name: str, size: int, timeout: float = 8.0):
+    avatar = None
+    if avatar_url:
+        try:
+            response = httpx.get(avatar_url, timeout=timeout, follow_redirects=True)
+            response.raise_for_status()
+            avatar = Image.open(io.BytesIO(response.content)).convert('RGB')
+            avatar = _profile_card_resize_cover(avatar, (size, size))
+        except Exception as e:
+            log.warning(f'Failed to download profile card avatar: {e}')
+
+    if avatar is None:
+        avatar = Image.new('RGB', (size, size), (45, 55, 75))
+        draw = ImageDraw.Draw(avatar)
+        initial = (display_name or '?').strip()[:1].upper() or '?'
+        font = _card_font(78, True)
+        draw.text((size // 2, size // 2 - 3), initial, font=font, fill=(226, 232, 240), anchor='mm')
+
+    mask = Image.new('L', (size, size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, size, size), radius=24, fill=255)
+    out = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    out.paste(avatar.convert('RGBA'), (0, 0), mask)
+    return out
+
+
+def _draw_profile_card_stat(draw, box, label: str, value: str, color, label_font, value_font):
+    x1, y1, x2, y2 = box
+    _draw_rounded_rect(draw, box, 16, fill=(15, 23, 42, 120), outline=(255, 255, 255, 24), width=1)
+    draw.text((x1 + 18, y1 + 10), label.upper(), font=label_font, fill=(148, 163, 184, 245))
+    fitted = _fit_profile_card_text(draw, value, value_font, max(1, x2 - x1 - 36))
+    draw.text((x1 + 18, y1 + 31), fitted, font=value_font, fill=color)
+
+
+def generate_profile_card(
+    member_id: int,
+    guild_id: int | None = None,
+    display_name: str | None = None,
+    avatar_url: str | None = None,
+) -> bytes | None:
     if not PIL_AVAILABLE:
         return None
-    data = load_data()
     uid  = str(member_id)
+    data = load_data(guild_id)
+    if uid not in data and guild_id is None:
+        for candidate_guild_id in _configured_guild_ids():
+            data = load_data(candidate_guild_id)
+            if uid in data:
+                break
     if uid not in data:
         return None
     info    = data[uid]
-    name    = info.get('name', 'Unknown')
-    total_earned = info.get('total_earned', 0)
-    balance = info.get('balance', 0)
+    name    = display_name or info.get('name', 'Unknown')
+    total_earned = _as_int(info.get('total_earned', 0))
+    balance = _as_int(info.get('balance', 0))
     debt = _active_debt(info)
     class_idx = min(get_money_class(total_earned), len(CLASS_NAMES) - 1)
-    streak  = info.get('streak', 0)
-    longest = info.get('longest_streak', 0)
-    total   = info.get('total', 0)
-    badges  = info.get('badges', [])
+    class_name = class_label(class_idx)
+    streak  = _as_int(info.get('streak', 0))
+    total   = _as_int(info.get('total', 0))
     today   = datetime.now().strftime('%Y-%m-%d')
-    today_secs = info['daily'].get(today, 0)
+    today_secs = _as_int(info.get('daily', {}).get(today, 0))
     today_secs += _get_unsaved_study_seconds(member_id)
-    today_earned = info.get('daily_earnings', {}).get(today, 0)
+    today_earned = _as_int(info.get('daily_earnings', {}).get(today, 0))
+    rank = _profile_card_rank(uid, data)
 
-    BG = (15, 23, 42); CARD = (30, 41, 59); ACCENT = (99, 102, 241)
-    ACCENT2 = (139, 92, 246); GOLD = (251, 191, 36); GREEN = (34, 197, 94)
-    TEXT1 = (226, 232, 240); TEXT2 = (148, 163, 184)
-    W, H = 680, 360
-    img  = Image.new('RGB', (W, H), BG)
-    draw = ImageDraw.Draw(img)
+    if class_idx >= len(CLASS_THRESHOLDS) - 1:
+        coin_start = CLASS_THRESHOLDS[class_idx]
+        coin_end = coin_start
+        coin_pct = 1.0
+    else:
+        coin_start = CLASS_THRESHOLDS[class_idx]
+        coin_end = CLASS_THRESHOLDS[class_idx + 1]
+        coin_pct = max(0.0, min(1.0, (total_earned - coin_start) / max(1, coin_end - coin_start)))
 
-    BOLD_FONTS = [
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-        '/System/Library/Fonts/Helvetica.ttc',
-        'C:/Windows/Fonts/arialbd.ttf',
-    ]
-    REG_FONTS = [
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
-        '/System/Library/Fonts/Helvetica.ttc',
-        'C:/Windows/Fonts/arial.ttf',
-    ]
-    f_huge = _try_font(BOLD_FONTS, 56); f_xl  = _try_font(BOLD_FONTS, 28)
-    f_lg   = _try_font(BOLD_FONTS, 20); f_md  = _try_font(REG_FONTS,  16)
-    f_sm   = _try_font(REG_FONTS,  13)
+    W, H = PROFILE_CARD_W, PROFILE_CARD_H
+    base = _profile_card_background(W, H).convert('RGBA')
+    base.alpha_composite(Image.new('RGBA', (W, H), (0, 0, 0, 80)))
+    layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
 
-    _draw_rounded_rect(draw, [16, 16, W-16, H-16], radius=16, fill=CARD, outline=(51, 65, 85), width=1)
-    BAR_W = W - 32
-    for i in range(BAR_W):
-        r = int(ACCENT[0] + (ACCENT2[0]-ACCENT[0]) * i / BAR_W)
-        g = int(ACCENT[1] + (ACCENT2[1]-ACCENT[1]) * i / BAR_W)
-        b = int(ACCENT[2] + (ACCENT2[2]-ACCENT[2]) * i / BAR_W)
-        draw.rectangle([16+i, 16, 17+i, 22], fill=(r, g, b))
+    TEXT = (248, 250, 252, 255)
+    MUTED = (203, 213, 225, 230)
+    SOFT = (148, 163, 184, 235)
+    CYAN = (103, 232, 249, 255)
+    BLUE = (96, 165, 250, 255)
+    GREEN = (74, 222, 128, 255)
+    GOLD = (251, 191, 36, 255)
+    PINK = (244, 114, 182, 255)
+    PURPLE = (167, 139, 250, 255)
 
-    cx, cy, cr = 96, 115, 54
-    draw.ellipse([cx-cr, cy-cr, cx+cr, cy+cr], fill=(51, 65, 85), outline=ACCENT, width=3)
-    draw.text((cx, cy-10), str(class_idx), font=f_huge, fill=ACCENT, anchor='mm')
-    draw.text((cx, cy+26), 'CLASS',   font=f_sm,   fill=TEXT2,   anchor='mm')
+    f_name = _card_font(44, True)
+    f_sub = _card_font(22)
+    f_level = _card_font(88, True)
+    f_level_label = _card_font(16, True)
+    f_label = _card_font(13, True)
+    f_stat = _card_font(21, True)
+    f_about_title = _card_font(22, True)
+    f_about = _card_font(18)
+    f_small = _card_font(16)
 
-    display_name = name if len(name) <= 18 else name[:17] + '…'
-    draw.text((168, 78),  display_name,                         font=f_xl, fill=TEXT1)
-    draw.text((170, 112), f'Class {class_idx} • {CLASS_NAMES[class_idx]}', font=f_md, fill=TEXT2)
+    _draw_rounded_rect(draw, (22, 22, W - 22, H - 22), 30, fill=(15, 23, 42, 150), outline=(255, 255, 255, 45), width=2)
+    _draw_rounded_rect(draw, (42, 40, W - 42, 300), 24, fill=(15, 23, 42, 118), outline=(255, 255, 255, 26), width=1)
+    _draw_rounded_rect(draw, (42, 318, W - 42, H - 40), 22, fill=(2, 6, 23, 116), outline=(255, 255, 255, 22), width=1)
 
-    coin_start = CLASS_THRESHOLDS[class_idx]
-    coin_end   = CLASS_THRESHOLDS[min(class_idx+1, len(CLASS_THRESHOLDS)-1)]
-    coin_pct   = min(1.0, (total_earned - coin_start) / max(1, coin_end - coin_start))
-    BX, BY, BW, BH = 168, 144, 280, 12
-    _draw_rounded_rect(draw, [BX, BY, BX+BW, BY+BH], radius=6, fill=(51, 65, 85))
-    fw = int(BW * coin_pct)
-    if fw > 8:
-        for i in range(fw):
-            r2 = int(ACCENT[0] + (ACCENT2[0]-ACCENT[0]) * i / max(1, fw))
-            g2 = int(ACCENT[1] + (ACCENT2[1]-ACCENT[1]) * i / max(1, fw))
-            b2 = int(ACCENT[2] + (ACCENT2[2]-ACCENT[2]) * i / max(1, fw))
-            draw.rectangle([BX+i, BY, BX+i+1, BY+BH], fill=(r2, g2, b2))
-    draw.text((BX, BY+BH+6), f'{total_earned:,} earned  ({int(coin_pct*100)}%)', font=f_sm, fill=TEXT2)
+    avatar_size = 142
+    avatar_x, avatar_y = 66, 66
+    _draw_rounded_rect(draw, (avatar_x - 5, avatar_y - 5, avatar_x + avatar_size + 5, avatar_y + avatar_size + 5), 28, fill=(255, 255, 255, 34), outline=(255, 255, 255, 65), width=2)
+    layer.alpha_composite(_profile_card_avatar(avatar_url, name, avatar_size), (avatar_x, avatar_y))
 
-    draw.rectangle([32, 190, W-32, 191], fill=(51, 65, 85))
+    display_name = _fit_profile_card_text(draw, name, f_name, 430)
+    draw.text((240, 72), display_name, font=f_name, fill=TEXT)
+    draw.text((242, 128), class_name, font=f_sub, fill=MUTED)
+
+    rank_text = f'#{rank:,}' if rank else '-'
+    draw.text((242, 168), f'Rank {rank_text}', font=f_small, fill=SOFT)
+    draw.text((355, 168), f'Total earned {_profile_card_compact_number(total_earned)} coins', font=f_small, fill=SOFT)
+
+    level_center_x, level_center_y = 146, 270
+    draw.text((level_center_x, level_center_y - 16), str(class_idx), font=f_level, fill=CYAN, anchor='mm')
+    draw.text((level_center_x, level_center_y + 48), 'CLASS LEVEL', font=f_level_label, fill=SOFT, anchor='mm')
+
+    bar_x, bar_y, bar_w, bar_h = 240, 220, 590, 24
+    _draw_rounded_rect(draw, (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), bar_h // 2, fill=(15, 23, 42, 210), outline=(255, 255, 255, 34), width=1)
+    fill_w = int(bar_w * coin_pct)
+    if fill_w > 0:
+        progress_img = Image.new('RGBA', (bar_w, bar_h), (0, 0, 0, 0))
+        progress_draw = ImageDraw.Draw(progress_img)
+        for i in range(fill_w):
+            t = i / max(1, fill_w - 1)
+            r = int(BLUE[0] + (CYAN[0] - BLUE[0]) * t)
+            g = int(BLUE[1] + (CYAN[1] - BLUE[1]) * t)
+            b = int(BLUE[2] + (CYAN[2] - BLUE[2]) * t)
+            progress_draw.line((i, 0, i, bar_h), fill=(r, g, b, 255))
+        progress_mask = Image.new('L', (bar_w, bar_h), 0)
+        progress_mask_draw = ImageDraw.Draw(progress_mask)
+        progress_mask_draw.rounded_rectangle((0, 0, fill_w, bar_h), radius=bar_h // 2, fill=255)
+        progress_clip = Image.new('RGBA', (bar_w, bar_h), (0, 0, 0, 0))
+        progress_clip.paste(progress_img, (0, 0), progress_mask)
+        layer.alpha_composite(progress_clip, (bar_x, bar_y))
+    progress_text = 'Max class' if coin_end == coin_start else f'{total_earned - coin_start:,} / {coin_end - coin_start:,} coins'
+    draw.text((bar_x, bar_y + 36), progress_text, font=f_small, fill=SOFT)
+    draw.text((bar_x + bar_w, bar_y + 36), f'{int(coin_pct * 100)}%', font=f_small, fill=SOFT, anchor='ra')
+
     stats = [
-        ('Hôm nay',   format_time(today_secs), GREEN),
-        ('Tổng cộng', format_time(total),       ACCENT),
-        ('Balance',   format_coins(balance),     GOLD),
-        ('Earned',    format_coins(today_earned), GREEN),
-        ('Debt',      format_coins(debt),        (236, 72, 153)),
-        ('Class',     CLASS_NAMES[class_idx],    ACCENT2),
+        ('Rank', rank_text, CYAN),
+        ('Balance', _profile_card_compact_number(balance), GOLD),
+        ('Total earned', _profile_card_compact_number(total_earned), GREEN),
+        ('Debt', _profile_card_compact_number(debt), PINK),
+        ('Streak', f'{streak} days', PURPLE),
+        ('Today study', format_time(today_secs), BLUE),
+        ('Earned today', _profile_card_compact_number(today_earned), GREEN),
+        ('All time study', format_time(total), MUTED),
     ]
-    cols, col_w = 3, (W-64) // 3
-    for i, (label, value, color) in enumerate(stats):
-        sx = 32 + (i % cols) * col_w; sy = 206 + (i // cols) * 58
-        draw.text((sx, sy),    label, font=f_sm, fill=TEXT2)
-        draw.text((sx, sy+18), value, font=f_lg, fill=color)
+    stat_w, stat_h = 184, 62
+    start_x, start_y = 64, 332
+    gap_x, gap_y = 18, 12
+    for index, (label, value, color) in enumerate(stats):
+        col = index % 4
+        row = index // 4
+        x1 = start_x + col * (stat_w + gap_x)
+        y1 = start_y + row * (stat_h + gap_y)
+        _draw_profile_card_stat(draw, (x1, y1, x1 + stat_w, y1 + stat_h), label, value, color, f_label, f_stat)
 
-    CHART_X, CHART_Y, CHART_H = 32, 328, 18
-    days_7 = [(datetime.now() - timedelta(days=6-i)).strftime('%Y-%m-%d') for i in range(7)]
-    vals   = [info['daily'].get(d, 0) // 60 for d in days_7]
-    max_v  = max(1, max(vals)); bw2 = 26; gap = 4
-    for i, (d, v) in enumerate(zip(days_7, vals)):
-        bx = CHART_X + i * (bw2+gap)
-        bh = max(2, int(CHART_H * v / max_v)); by = CHART_Y + CHART_H - bh
-        _draw_rounded_rect(draw, [bx, by, bx+bw2, CHART_Y+CHART_H], radius=3,
-                           fill=ACCENT if d == today else (51, 65, 85+20))
-        draw.text((bx+bw2//2, CHART_Y+CHART_H+5), d[8:], font=f_sm,
-                  fill=TEXT1 if d == today else TEXT2, anchor='mt')
-    draw.text((CHART_X + 7*(bw2+gap)+8, CHART_Y+4), '7 ngày gần đây', font=f_sm, fill=TEXT2)
-    if badges:
-        bx_start = W - 200
-        draw.text((bx_start, 328), 'Huy hiệu', font=f_sm, fill=TEXT2)
-        line = '  '.join(BADGES[b]['name'].split(' ')[-1] for b in badges[:6] if b in BADGES)
-        draw.text((bx_start, 344), line[:28], font=f_sm, fill=GOLD)
-    ts = datetime.now().strftime('%d/%m/%Y %H:%M')
-    draw.text((W-32, H-24), f'study.bot • {ts}', font=f_sm, fill=(71, 85, 105), anchor='rm')
+    about = (
+        info.get('about_me')
+        or info.get('about')
+        or info.get('bio')
+        or 'One percent better every day.'
+    )
+    about_lines = _wrap_profile_card_text(draw, about, f_about, 572, 2)
+    about_x, about_y = 64, 488
+    draw.text((about_x, about_y), 'About me', font=f_about_title, fill=TEXT)
+    for i, line in enumerate(about_lines):
+        draw.text((about_x + 116, about_y + 2 + i * 23), line, font=f_about, fill=MUTED)
+
+    final = Image.alpha_composite(base, layer)
+    mask = Image.new('L', (W, H), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, W, H), radius=34, fill=255)
+    out = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    out.paste(final, (0, 0), mask)
 
     buf = io.BytesIO()
-    img.save(buf, format='PNG', optimize=True)
+    out.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+STUDY_LEADERBOARD_PER_PAGE = 10
+STUDY_LEADERBOARD_W = 900
+STUDY_LEADERBOARD_H = 980
+STUDY_CHART_W = 900
+STUDY_CHART_H = 560
+
+
+def _study_leaderboard_time(seconds: int) -> str:
+    seconds = max(0, _as_int(seconds))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if hours:
+        return f'{hours}h {minutes:02d}m'
+    return f'{minutes}m'
+
+
+def _member_avatar_url(member: discord.Member | discord.User | None, size: int = 128) -> str | None:
+    avatar = getattr(member, 'display_avatar', None)
+    if not avatar:
+        return None
+    try:
+        return str(avatar.with_size(size).url)
+    except Exception:
+        return str(getattr(avatar, 'url', '') or '') or None
+
+
+def _build_study_leaderboard_entries(guild: discord.Guild | None) -> tuple[list[dict], str]:
+    today = datetime.now().strftime('%Y-%m-%d')
+    now = datetime.now()
+    data = _get_live_enriched_data(guild)
+    entries: list[dict] = []
+
+    for uid, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        seconds = _as_int(info.get('daily', {}).get(today, 0))
+        member = None
+        try:
+            member_id = int(uid)
+        except (TypeError, ValueError):
+            member_id = None
+        if member_id is not None:
+            if guild:
+                member = guild.get_member(member_id)
+            seconds += _get_unsaved_study_seconds(member_id, now)
+        if seconds <= 0:
+            continue
+        entries.append({
+            'user_id': member_id,
+            'display_name': member.display_name if member else str(info.get('name') or f'User {uid}'),
+            'avatar_url': _member_avatar_url(member, 128),
+            'study_seconds': seconds,
+        })
+
+    entries.sort(key=lambda entry: entry['study_seconds'], reverse=True)
+    for rank, entry in enumerate(entries, start=1):
+        entry['rank'] = rank
+    return entries, today
+
+
+def render_study_leaderboard_image(
+    entries: list[dict],
+    page: int,
+    total_pages: int,
+    today: str,
+) -> bytes:
+    W, H = STUDY_LEADERBOARD_W, STUDY_LEADERBOARD_H
+    base = _profile_card_background(W, H).convert('RGBA')
+    base.alpha_composite(Image.new('RGBA', (W, H), (0, 0, 0, 120)))
+    layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    f_title = _card_font(42, True)
+    f_sub = _card_font(18)
+    f_rank = _card_font(24, True)
+    f_name = _card_font(25, True)
+    f_time = _card_font(25, True)
+    f_empty = _card_font(26, True)
+    f_footer = _card_font(18)
+
+    TEXT = (248, 250, 252, 255)
+    MUTED = (203, 213, 225, 230)
+    SOFT = (148, 163, 184, 230)
+    GOLD = (250, 204, 21, 255)
+    CYAN = (103, 232, 249, 255)
+
+    _draw_rounded_rect(draw, (28, 24, W - 28, H - 24), 30, fill=(6, 18, 30, 168), outline=(255, 255, 255, 36), width=2)
+    _draw_rounded_rect(draw, (52, 42, W - 52, 134), 24, fill=(6, 32, 46, 166), outline=(255, 255, 255, 26), width=1)
+    draw.text((W // 2, 78), 'STUDY TIME LEADERBOARD', anchor='mm', font=f_title, fill=GOLD)
+    draw.text((W // 2, 114), f'Today • {today}', anchor='mm', font=f_sub, fill=MUTED)
+
+    if not entries:
+        _draw_rounded_rect(draw, (74, 180, W - 74, 290), 22, fill=(13, 45, 64, 150), outline=(255, 255, 255, 22), width=1)
+        draw.text((W // 2, 235), 'No study time recorded today', anchor='mm', font=f_empty, fill=MUTED)
+    else:
+        start_y = 160
+        row_h = 62
+        gap = 14
+        for index, entry in enumerate(entries):
+            y = start_y + index * (row_h + gap)
+            _draw_rounded_rect(draw, (58, y, W - 58, y + row_h), 19, fill=(13, 45, 64, 162), outline=(255, 255, 255, 24), width=1)
+
+            avatar = _profile_card_avatar(entry.get('avatar_url'), entry.get('display_name', ''), 44, timeout=2.5)
+            layer.alpha_composite(avatar, (78, y + 9))
+
+            rank = f'#{entry.get("rank", 0)}'
+            name = _fit_profile_card_text(draw, entry.get('display_name', 'Unknown'), f_name, 430)
+            time_text = _study_leaderboard_time(entry.get('study_seconds', 0))
+            rank_color = GOLD if entry.get('rank') in (1, 2, 3) else CYAN
+            draw.text((150, y + row_h // 2), rank, anchor='lm', font=f_rank, fill=rank_color)
+            draw.text((225, y + row_h // 2), name, anchor='lm', font=f_name, fill=TEXT)
+            draw.text((790, y + row_h // 2), time_text, anchor='rm', font=f_time, fill=TEXT)
+
+    draw.text((W // 2, H - 44), f'Page {page}/{total_pages}', anchor='mm', font=f_footer, fill=SOFT)
+    final = Image.alpha_composite(base, layer)
+    buf = io.BytesIO()
+    final.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+class StudyLeaderboardView(discord.ui.View):
+    def __init__(self, author_id: int, entries: list[dict], today: str):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.entries = entries
+        self.today = today
+        self.page = 1
+        self.per_page = STUDY_LEADERBOARD_PER_PAGE
+        self.total_pages = max(1, math.ceil(len(entries) / self.per_page))
+        self._sync_buttons()
+
+    def _page_entries(self) -> list[dict]:
+        start = (self.page - 1) * self.per_page
+        return self.entries[start:start + self.per_page]
+
+    def _image_file(self) -> discord.File:
+        image = render_study_leaderboard_image(
+            self._page_entries(),
+            self.page,
+            self.total_pages,
+            self.today,
+        )
+        return discord.File(io.BytesIO(image), filename=f'study_leaderboard_{self.page}.png')
+
+    def _sync_buttons(self):
+        if len(self.children) < 5:
+            return
+        self.children[0].disabled = self.page <= 1
+        self.children[1].disabled = self.page <= 1
+        self.children[2].label = f'{self.page}/{self.total_pages}'
+        self.children[2].disabled = True
+        self.children[3].disabled = self.page >= self.total_pages
+        self.children[4].disabled = self.page >= self.total_pages
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        is_admin = bool(getattr(getattr(interaction.user, 'guild_permissions', None), 'administrator', False))
+        if interaction.user.id == self.author_id or is_admin:
+            return True
+        await interaction.response.send_message('Bạn không thể điều khiển bảng xếp hạng này.', ephemeral=True)
+        return False
+
+    async def _edit_page(self, interaction: discord.Interaction):
+        self._sync_buttons()
+        await interaction.response.edit_message(attachments=[self._image_file()], view=self)
+
+    @discord.ui.button(label='First', style=discord.ButtonStyle.secondary)
+    async def first_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 1
+        await self._edit_page(interaction)
+
+    @discord.ui.button(label='Prev', style=discord.ButtonStyle.primary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(1, self.page - 1)
+        await self._edit_page(interaction)
+
+    @discord.ui.button(label='1/1', style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        return
+
+    @discord.ui.button(label='Next', style=discord.ButtonStyle.primary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.total_pages, self.page + 1)
+        await self._edit_page(interaction)
+
+    @discord.ui.button(label='Last', style=discord.ButtonStyle.secondary)
+    async def last_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = self.total_pages
+        await self._edit_page(interaction)
+
+
+def _previous_month(year: int, month: int) -> tuple[int, int]:
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def _monthly_study_seconds(data: dict, year: int, month: int, guild: discord.Guild | None = None) -> list[int]:
+    days = calendar.monthrange(year, month)[1]
+    totals = [0] * days
+    for uid, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        daily = info.get('daily', {})
+        if not isinstance(daily, dict):
+            continue
+        for day in range(1, days + 1):
+            totals[day - 1] += _as_int(daily.get(f'{year:04d}-{month:02d}-{day:02d}', 0))
+
+    now = datetime.now()
+    if year == now.year and month == now.month:
+        today_index = now.day - 1
+        tracked_member_ids: set[int] = set()
+        for uid in data.keys():
+            try:
+                tracked_member_ids.add(int(uid))
+            except (TypeError, ValueError):
+                continue
+        for member_id in list(join_times.keys()):
+            if member_id not in tracked_member_ids:
+                continue
+            if guild and not guild.get_member(member_id):
+                continue
+            totals[today_index] += _get_unsaved_study_seconds(member_id, now)
+    return totals
+
+
+def render_monthly_study_chart_image(
+    current: list[int],
+    previous: list[int],
+    now: datetime,
+    subject: str,
+) -> bytes:
+    W, H = STUDY_CHART_W, STUDY_CHART_H
+    base = _profile_card_background(W, H).convert('RGBA')
+    base.alpha_composite(Image.new('RGBA', (W, H), (0, 0, 0, 116)))
+    layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    f_title = _card_font(34, True)
+    f_sub = _card_font(18)
+    f_axis = _card_font(13)
+    f_summary = _card_font(20, True)
+    f_legend = _card_font(16, True)
+
+    TEXT = (248, 250, 252, 255)
+    MUTED = (203, 213, 225, 230)
+    SOFT = (148, 163, 184, 230)
+    GOLD = (250, 204, 21, 235)
+    BLUE = (56, 189, 248, 210)
+
+    _draw_rounded_rect(draw, (24, 22, W - 24, H - 22), 30, fill=(6, 18, 30, 168), outline=(255, 255, 255, 36), width=2)
+    draw.text((52, 54), 'MONTHLY STUDY CHART', font=f_title, fill=TEXT)
+    draw.text((54, 95), f'{subject} • This month vs last month', font=f_sub, fill=MUTED)
+
+    chart_x, chart_y, chart_w, chart_h = 72, 142, 760, 284
+    _draw_rounded_rect(draw, (chart_x - 18, chart_y - 20, chart_x + chart_w + 18, chart_y + chart_h + 44), 22, fill=(13, 45, 64, 132), outline=(255, 255, 255, 22), width=1)
+
+    max_days = max(len(current), len(previous), 1)
+    max_hours = max(max(current or [0]), max(previous or [0]), 3600) / 3600
+    max_hours = max(1.0, max_hours * 1.12)
+
+    for tick in range(5):
+        ratio = tick / 4
+        y = chart_y + chart_h - int(chart_h * ratio)
+        draw.line((chart_x, y, chart_x + chart_w, y), fill=(255, 255, 255, 24), width=1)
+        label = f'{max_hours * ratio:.0f}h'
+        draw.text((chart_x - 12, y), label, anchor='rm', font=f_axis, fill=SOFT)
+
+    group_w = chart_w / max_days
+    bar_w = max(4, int(group_w * 0.28))
+    for day in range(1, max_days + 1):
+        cur = current[day - 1] if day <= len(current) else 0
+        prev = previous[day - 1] if day <= len(previous) else 0
+        center = chart_x + (day - 0.5) * group_w
+        for value, color, offset in ((prev, BLUE, -bar_w * 0.6), (cur, GOLD, bar_w * 0.6)):
+            bar_h = int(chart_h * ((value / 3600) / max_hours))
+            x1 = int(center + offset - bar_w / 2)
+            x2 = x1 + bar_w
+            y1 = chart_y + chart_h - bar_h
+            y2 = chart_y + chart_h
+            if bar_h > 0:
+                _draw_rounded_rect(draw, (x1, y1, x2, y2), min(5, bar_w // 2), fill=color)
+        if day == 1 or day == max_days or day % 5 == 0:
+            draw.text((int(center), chart_y + chart_h + 12), str(day), anchor='mt', font=f_axis, fill=SOFT)
+
+    legend_y = 454
+    draw.rounded_rectangle((56, legend_y, 72, legend_y + 16), radius=5, fill=GOLD)
+    draw.text((82, legend_y - 1), 'This month', font=f_legend, fill=MUTED)
+    draw.rounded_rectangle((202, legend_y, 218, legend_y + 16), radius=5, fill=BLUE)
+    draw.text((228, legend_y - 1), 'Last month', font=f_legend, fill=MUTED)
+
+    current_total = sum(current)
+    previous_total = sum(previous)
+    summary = f'This month: {format_time(current_total)}   •   Last month: {format_time(previous_total)}'
+    draw.text((W // 2, 506), summary, anchor='mm', font=f_summary, fill=TEXT)
+
+    final = Image.alpha_composite(base, layer)
+    buf = io.BytesIO()
+    final.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return buf.getvalue()
 
@@ -2080,6 +3008,116 @@ async def _fetch_member_from_guild(guild: discord.Guild, member_id: int) -> disc
     return None
 
 
+def _persisted_class_role_ids(guild_id: int) -> dict[int, int]:
+    initialize_database()
+    return repository.get_class_roles(int(guild_id))
+
+
+def _save_guild_class_role_ids(guild_id: int, role_ids: dict[int, int]):
+    initialize_database()
+    repository.save_class_roles(
+        int(guild_id),
+        {
+            level: (role_id, CLASS_ROLE_NAMES.get(level, ''))
+            for level, role_id in sorted(role_ids.items())
+            if level in CLASS_ROLE_NAMES and role_id
+        },
+    )
+
+
+def _find_class_role_by_level(guild: discord.Guild, level: int) -> discord.Role | None:
+    role_name = CLASS_ROLE_NAMES.get(level)
+    if not role_name:
+        return None
+
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role:
+        return role
+
+    persisted_id = _persisted_class_role_ids(guild.id).get(level)
+    if persisted_id:
+        role = guild.get_role(persisted_id)
+        if role:
+            return role
+
+    legacy_id = LEVEL_ROLES.get(level)
+    if legacy_id:
+        role = guild.get_role(legacy_id)
+        if role:
+            return role
+
+    return None
+
+
+def _known_class_role_ids(guild: discord.Guild, role_ids: dict[int, int] | None = None) -> set[int]:
+    ids = {int(role_id) for role_id in (role_ids or {}).values() if role_id}
+    ids.update(_persisted_class_role_ids(guild.id).values())
+    for level in CLASS_ROLE_NAMES:
+        role = discord.utils.get(guild.roles, name=CLASS_ROLE_NAMES[level])
+        if role:
+            ids.add(role.id)
+        legacy_id = LEVEL_ROLES.get(level)
+        if legacy_id and guild.get_role(legacy_id):
+            ids.add(legacy_id)
+    return ids
+
+
+def _unmanageable_class_roles(guild: discord.Guild, role_ids: dict[int, int]) -> list[discord.Role]:
+    bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if not bot_member:
+        return []
+    roles = []
+    for role_id in role_ids.values():
+        role = guild.get_role(role_id)
+        if role and role >= bot_member.top_role:
+            roles.append(role)
+    return roles
+
+
+async def ensure_class_roles(guild: discord.Guild) -> dict[int, int]:
+    bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if not bot_member:
+        log.error(f'[RoleSetup] Could not resolve bot member in {guild.name}')
+        return {}
+
+    if not bot_member.guild_permissions.manage_roles:
+        log.error(f'[RoleSetup] Bot thiếu quyền Manage Roles trong {guild.name}')
+        return {}
+
+    role_ids: dict[int, int] = {}
+    for level, role_name in CLASS_ROLE_NAMES.items():
+        role = _find_class_role_by_level(guild, level)
+
+        if role is None:
+            try:
+                role = await guild.create_role(
+                    name=role_name,
+                    reason='Auto-create class role for study economy bot',
+                )
+                log.info(f'[RoleSetup] Created role {role_name} in {guild.name}')
+            except discord.Forbidden:
+                log.error(f'[RoleSetup] Không đủ quyền tạo role {role_name} trong {guild.name}')
+                continue
+            except discord.HTTPException as e:
+                log.error(f'[RoleSetup] Lỗi tạo role {role_name} trong {guild.name}: {e}')
+                continue
+            except Exception as e:
+                log.error(f'[RoleSetup] Lỗi tạo role {role_name} trong {guild.name}: {e}', exc_info=True)
+                continue
+
+        if role >= bot_member.top_role:
+            log.warning(
+                f'[RoleSetup] Role {role.name} cao hơn hoặc bằng role bot '
+                f'({bot_member.top_role.name}) trong {guild.name}; bot không thể gán role này.'
+            )
+
+        role_ids[level] = role.id
+
+    if role_ids:
+        _save_guild_class_role_ids(guild.id, role_ids)
+    return role_ids
+
+
 def _get_level_role_name(role_id: int | None, guild: discord.Guild | None = None) -> str | None:
     """Resolve a role ID to its display name, falling back across known guilds."""
     if not role_id:
@@ -2100,7 +3138,11 @@ def _get_level_role_name(role_id: int | None, guild: discord.Guild | None = None
     return f'ID:{role_id}'
 
 
-async def _ensure_role_synced(member: discord.Member, current_level: int):
+async def _ensure_role_synced(
+    member: discord.Member,
+    current_level: int,
+    role_ids: dict[int, int] | None = None,
+):
     """Assign the correct money-class role to `member` and remove stale ones.
 
     Uses a per-member lock to serialize concurrent syncs. Validates bot
@@ -2114,7 +3156,15 @@ async def _ensure_role_synced(member: discord.Member, current_level: int):
         current_level = max(0, min(int(current_level), len(LEVEL_THRESHOLDS) - 1))
         guild = member.guild
         member_name = member.display_name
-        expected_role_id = LEVEL_ROLES.get(current_level)
+        role_ids = role_ids if role_ids is not None else await ensure_class_roles(guild)
+        if not role_ids:
+            return
+
+        if current_level in CLASS_ROLE_NAMES and current_level not in role_ids:
+            log.error(f'[RoleSync] No class role available for class {current_level} in {guild.name}')
+            return
+
+        expected_role_id = role_ids.get(current_level)
         expected_role = guild.get_role(expected_role_id) if expected_role_id else None
 
         if expected_role_id and not expected_role:
@@ -2206,11 +3256,9 @@ async def _ensure_role_synced(member: discord.Member, current_level: int):
 
         # 2) Remove stale class roles (but only ones the bot can actually manage).
         roles_to_remove = []
-        for lvl, role_id in LEVEL_ROLES.items():
-            if role_id is None:
-                continue
-            role = guild.get_role(role_id)
-            if role and role in current_roles and role != expected_role:
+        class_role_ids = _known_class_role_ids(guild, role_ids)
+        for role in current_roles:
+            if role.id in class_role_ids and role != expected_role:
                 roles_to_remove.append(role)
 
         if not roles_to_remove:
@@ -2235,9 +3283,48 @@ async def _ensure_role_synced(member: discord.Member, current_level: int):
             except Exception as e:
                 log.error(f'[RoleSync] Error removing roles from {member_name}: {e}')
 
+
+async def _sync_guild_class_members(
+    guild: discord.Guild,
+    role_ids: dict[int, int] | None = None,
+) -> tuple[int, int]:
+    role_ids = role_ids if role_ids is not None else await ensure_class_roles(guild)
+    if not role_ids:
+        return 0, 0
+
+    with guild_data_context(guild.id):
+        data = load_data()
+    updated = 0
+    skipped = 0
+    members_to_sync: list[tuple[discord.Member, int]] = []
+    for uid, info in data.items():
+        try:
+            member_id = int(uid)
+        except (ValueError, TypeError):
+            continue
+        member = guild.get_member(member_id) or await _fetch_member_from_guild(guild, member_id)
+        if not member:
+            skipped += 1
+            continue
+        members_to_sync.append((member, info.get('class', info.get('level', 0))))
+        updated += 1
+
+    batches = list(_iter_chunks(members_to_sync, ROLE_SYNC_BATCH_SIZE))
+    for idx, batch in enumerate(batches):
+        await asyncio.gather(
+            *[_ensure_role_synced(member, level, role_ids=role_ids) for member, level in batch],
+            return_exceptions=True,
+        )
+        if idx < len(batches) - 1:
+            await asyncio.sleep(ROLE_SYNC_BATCH_DELAY)
+
+    return updated, skipped
+
 # ─── SESSION MANAGEMENT ──────────────────────────────────────────────────────
 
 def record_join(member: discord.Member):
+    _capture_guild_context(member.guild.id)
+    runtime_member_guild_ids[member.id] = member.guild.id
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
     join_times[member.id]      = now
@@ -2283,6 +3370,7 @@ def _get_unsaved_study_seconds(member_id: int, now: datetime | None = None) -> i
     return max(0, int((end_time - start_time).total_seconds()))
 
 async def _do_checkpoint(member: discord.Member, now: datetime | None = None) -> tuple[int, dict]:
+    _capture_guild_context(member.guild.id)
     if member.id not in join_times:
         return 0, _default_progress_result()
     now = now or datetime.now()
@@ -2311,7 +3399,8 @@ async def _check_milestones(member: discord.Member):
         return
     await notify_study_milestones(member)
 
-async def _check_quests_and_badges(member: discord.Member):
+async def _check_quests_and_badges(member: discord.Member, channel=None):
+    _capture_guild_context(member.guild.id)
     uid   = str(member.id)
     today = datetime.now().strftime('%Y-%m-%d')
     generate_daily_quests(uid, today)
@@ -2325,22 +3414,23 @@ async def _check_quests_and_badges(member: discord.Member):
     claim_completed_quest_notifications(uid, today)
 
     await _ensure_role_synced(member, new_class)
-    await notify_coin_milestones(member)
+    await notify_coin_milestones(member, channel)
         
     check_and_award_badges(uid, member)
 
 async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: bool = False) -> int:
+    _capture_guild_context(member.guild.id)
     if member.id not in join_times: return 0
 
     now        = datetime.now()
     _, result = await _do_checkpoint(member, now)
     if result.get('level_up'):
         await _ensure_role_synced(member, result['new_level'])
-    await _handle_progress_notifications(member, result)
 
     total_duration = int((now - join_times.pop(member.id)).total_seconds())
     last_checkpoint.pop(member.id, None)
     milestone_sent.pop(member.id, None)
+    runtime_member_guild_ids.pop(member.id, None)
     media_active_members.discard(member.id)
     reset_cam_notification(member.id)
     save_runtime_state()
@@ -2386,38 +3476,37 @@ async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: boo
 
 # ─── LIVE MESSAGE ─────────────────────────────────────────────────────────────
 
-def _server_focus_channel_ids(server: dict, guild: discord.Guild) -> set[int]:
-    ids = set(server['voice_channels'])
-    for room_id, meta in list(temp_rooms.items()):
+def _guild_focus_channel_ids(guild: discord.Guild) -> set[int]:
+    config = get_guild_config(guild.id)
+    ids = {_as_int(ch) for ch in config.get('focus_channel_ids', []) if _as_int(ch)}
+    for meta in list(temp_rooms.values()):
         if meta.get('guild_id') == guild.id:
-            ids.add(room_id)
+            room_id = _as_int(meta.get('room_id'))
+            if room_id:
+                ids.add(room_id)
     return ids
 
-def _channel_belongs_to_server_focus(channel, server: dict) -> bool:
+def _channel_belongs_to_guild_focus(channel, guild: discord.Guild) -> bool:
     if not channel:
         return False
-    report_channel = bot.get_channel(server['report_channel'])
-    if report_channel and report_channel.guild.id != channel.guild.id:
+    if channel.guild.id != guild.id:
         return False
-    if channel.id in server['voice_channels']:
-        return True
-    meta = temp_rooms.get(channel.id)
-    return bool(meta and meta.get('guild_id') == channel.guild.id)
+    return channel.id in _guild_focus_channel_ids(guild)
 
 async def _update_live_message_for_channel(channel):
-    for server in SERVERS:
-        if _channel_belongs_to_server_focus(channel, server):
-            await update_live_message(server)
-            break
+    if channel and getattr(channel, 'guild', None):
+        await update_live_message(channel.guild)
 
-async def update_live_message(server: dict):
-    channel = bot.get_channel(server['report_channel'])
+async def update_live_message(guild: discord.Guild):
+    config = get_guild_config(guild.id)
+    report_channel_id = config.get('report_channel_id')
+    channel = bot.get_channel(report_channel_id) if report_channel_id else None
     if not channel: return
     now       = datetime.now()
-    guild     = channel.guild
-    voice_ids = _server_focus_channel_ids(server, guild)
+    voice_ids = _guild_focus_channel_ids(guild)
     today     = now.strftime('%Y-%m-%d')
-    data      = _get_live_enriched_data()
+    with guild_data_context(guild.id):
+        data = _get_live_enriched_data(guild)
     active    = []
     for mid, start_time in list(join_times.items()):
         m = guild.get_member(mid)
@@ -2468,91 +3557,97 @@ async def update_live_message(server: dict):
         log.error(f'Live message error: {e}')
 
 async def update_all_live_messages():
-    for server in SERVERS:
-        await update_live_message(server)
+    for guild in bot.guilds:
+        await update_live_message(guild)
 
 # ─── DAILY BOARD ─────────────────────────────────────────────────────────────
 
-async def _send_daily_board(target_date: str | None = None):
+async def _send_daily_board(target_date: str | None = None, guild: discord.Guild | None = None):
     if target_date is None:
         report_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     else:
         report_date = target_date
 
-    data        = load_data()
-    sorted_data = sorted(
-        data.items(),
-        key=lambda x: x[1].get('daily', {}).get(report_date, 0),
-        reverse=True,
-    )
-    has_data = any(info.get('daily', {}).get(report_date, 0) > 0 for _, info in sorted_data)
-    day_fmt  = datetime.strptime(report_date, '%Y-%m-%d').strftime('%d/%m/%Y')
+    target_guilds = [guild] if guild else list(bot.guilds)
+    for target_guild in target_guilds:
+        config = get_guild_config(target_guild.id)
+        report_channel_id = config.get('report_channel_id')
+        ch = bot.get_channel(report_channel_id) if report_channel_id else None
+        if not ch:
+            continue
+        with guild_data_context(target_guild.id):
+            data = load_data()
+        sorted_data = sorted(
+            data.items(),
+            key=lambda x: x[1].get('daily', {}).get(report_date, 0),
+            reverse=True,
+        )
+        has_data = any(info.get('daily', {}).get(report_date, 0) > 0 for _, info in sorted_data)
+        day_fmt  = datetime.strptime(report_date, '%Y-%m-%d').strftime('%d/%m/%Y')
 
-    lines = [
-        f'📊 **BÁO CÁO NGÀY {day_fmt}**',
-        f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    ]
+        lines = [
+            f'📊 **BÁO CÁO NGÀY {day_fmt}**',
+            f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        ]
 
-    if not has_data:
-        lines.append('😴 Hôm nay chưa có ai vào học!')
-    else:
-        rank = 0
-        for uid, info in sorted_data:
-            t = info.get('daily', {}).get(report_date, 0)
-            if t <= 0:
-                continue
-            rank  += 1
-            medal  = ['🥇', '🥈', '🥉'][rank-1] if rank <= 3 else f'`{rank}.`'
-            class_idx = info.get('class', info.get('level', 0))
-            streak = info.get('streak', 0)
-            earned = info.get('daily_earnings', {}).get(report_date, 0)
-            total  = info.get('total', 0)
-            lines.append(
-                f'{medal} **{info["name"]}**'
-                f' · `{class_label(class_idx)}` · 🔥`{streak}d`'
-                f'\n       ⏱️ Hôm nay: `{format_time(t)}`'
-                f'  |  📚 Tổng: `{format_time(total)}`'
-                f'  |  💰 `{format_coins(earned)}`'
-            )
-
-    total_today  = sum(info.get('daily', {}).get(report_date, 0) for _, info in sorted_data)
-    active_count = sum(1 for _, info in sorted_data if info.get('daily', {}).get(report_date, 0) > 0)
-    lines += [
-        f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-        f'👥 **{active_count} người** học hôm nay · ⏱️ Tổng: **{format_time(total_today)}**',
-        f'_Bảng tổng kết tự động mỗi ngày lúc 00:00 🕛_',
-    ]
-
-    chunks      = []
-    current     = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if current_len + line_len > 1900 and current:
-            chunks.append('\n'.join(current))
-            current     = [line]
-            current_len = line_len
+        if not has_data:
+            lines.append('😴 Hôm nay chưa có ai vào học!')
         else:
-            current.append(line)
-            current_len += line_len
-    if current:
-        chunks.append('\n'.join(current))
+            rank = 0
+            for uid, info in sorted_data:
+                t = info.get('daily', {}).get(report_date, 0)
+                if t <= 0:
+                    continue
+                rank  += 1
+                medal  = ['🥇', '🥈', '🥉'][rank-1] if rank <= 3 else f'`{rank}.`'
+                class_idx = info.get('class', info.get('level', 0))
+                streak = info.get('streak', 0)
+                earned = info.get('daily_earnings', {}).get(report_date, 0)
+                total  = info.get('total', 0)
+                lines.append(
+                    f'{medal} **{info["name"]}**'
+                    f' · `{class_label(class_idx)}` · 🔥`{streak}d`'
+                    f'\n       ⏱️ Hôm nay: `{format_time(t)}`'
+                    f'  |  📚 Tổng: `{format_time(total)}`'
+                    f'  |  💰 `{format_coins(earned)}`'
+                )
 
-    for server in SERVERS:
-        ch = bot.get_channel(server['report_channel'])
-        if ch:
-            try:
-                for chunk in chunks:
-                    await ch.send(chunk)
-                log.info(f'[DailyBoard] Gửi ngày {report_date} → #{ch.name}')
-            except Exception as e:
-                log.error(f'[DailyBoard] Lỗi: {e}')
+        total_today  = sum(info.get('daily', {}).get(report_date, 0) for _, info in sorted_data)
+        active_count = sum(1 for _, info in sorted_data if info.get('daily', {}).get(report_date, 0) > 0)
+        lines += [
+            f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            f'👥 **{active_count} người** học hôm nay · ⏱️ Tổng: **{format_time(total_today)}**',
+            f'_Bảng tổng kết tự động mỗi ngày lúc 00:00 🕛_',
+        ]
+
+        chunks      = []
+        current     = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if current_len + line_len > 1900 and current:
+                chunks.append('\n'.join(current))
+                current     = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
+            chunks.append('\n'.join(current))
+
+        try:
+            for chunk in chunks:
+                await ch.send(chunk)
+            log.info(f'[DailyBoard] Gửi ngày {report_date} → #{ch.name}')
+        except Exception as e:
+            log.error(f'[DailyBoard] Lỗi: {e}')
 
 # ─── REMIND SYSTEM ───────────────────────────────────────────────────────────
 
 async def _remind_loop(member: discord.Member, hour: int):
     while True:
         try:
+            _capture_guild_context(member.guild.id)
             now    = datetime.now()
             target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
             if target <= now:
@@ -2648,15 +3743,7 @@ async def _force_stop_pomodoro_if_active(member: discord.Member, reason: str = '
     except Exception as e:
         log.error(f'Pomodoro history sync error ({member.display_name}): {e}')
 
-    await send_private_notify_embed(
-        member=member,
-        title='Pomodoro đã dừng',
-        description=(
-            f'Pomodoro đã dừng tự động vì bạn {reason}.\n'
-            'Dùng `/pomodoro start` để bắt đầu lại khi sẵn sàng.'
-        ),
-        color=NOTIFY_GOLD,
-    )
+    log.info(f'Pomodoro stopped automatically for {member.display_name}: {reason}')
     return True
 
 async def _cancel_reminder_task(member_id: int):
@@ -2682,43 +3769,51 @@ def cancel_task(mid: int):
 
 def start_check(member: discord.Member, reason: str):
     cancel_task(member.id)
+    _capture_guild_context(member.guild.id)
     pending_checks[member.id] = asyncio.create_task(check_media(member))
     log.info(f'{member.display_name} {reason} → {WAIT_SECONDS}s countdown.')
 
 # ─── TEMPORARY ROOM HELPERS ──────────────────────────────────────────────────
 
 def _is_create_room_channel(channel) -> bool:
-    return bool(
-        CREATE_ROOM_CHANNEL_ID
-        and channel
-        and channel.id == CREATE_ROOM_CHANNEL_ID
-    )
+    if not channel or not getattr(channel, 'guild', None):
+        return False
+    config = get_guild_config(channel.guild.id)
+    return bool(config.get('create_room_channel_id') == channel.id)
 
 def _is_temporary_room_id(channel_id: int | None) -> bool:
-    return bool(channel_id and channel_id in temp_rooms)
+    return bool(_temp_room_key_for_channel_id(channel_id))
 
 def is_focus_channel(channel_id: int | None) -> bool:
-    return bool(channel_id and (channel_id in FOCUS_CHANNEL_IDS or channel_id in temp_rooms))
+    if not channel_id:
+        return False
+    if _is_temporary_room_id(channel_id):
+        return True
+    channel = bot.get_channel(channel_id)
+    if channel and getattr(channel, 'guild', None):
+        return channel_id in _guild_focus_channel_ids(channel.guild)
+    for config in repository.list_guild_configs():
+        if channel_id in set(config.get('focus_channel_ids') or []):
+            return True
+    return False
 
 def _temp_room_name(member: discord.Member) -> str:
     clean_name = ' '.join(member.display_name.split()).strip() or f'User {member.id}'
     return f'📚 Phòng của {clean_name[:80]}'
 
 def _register_temporary_room(channel: discord.VoiceChannel, owner: discord.Member):
-    temp_rooms[channel.id] = {
+    temp_rooms[_temp_room_key(channel.guild.id, channel.id)] = {
         'room_id': channel.id,
         'owner_id': owner.id,
         'guild_id': channel.guild.id,
         'created_at': datetime.now(),
     }
-    if channel.id not in FOCUS_CHANNEL_IDS:
-        FOCUS_CHANNEL_IDS.append(channel.id)
     save_runtime_state()
 
 def _remove_temporary_room_tracking(channel_id: int):
-    temp_rooms.pop(channel_id, None)
-    while channel_id not in STATIC_FOCUS_CHANNEL_IDS and channel_id in FOCUS_CHANNEL_IDS:
-        FOCUS_CHANNEL_IDS.remove(channel_id)
+    key = _temp_room_key_for_channel_id(channel_id)
+    if key:
+        temp_rooms.pop(key, None)
 
     task = temporary_room_delete_tasks.pop(channel_id, None)
     if task and not task.done():
@@ -2836,19 +3931,30 @@ async def _send_temporary_room_welcome(channel, owner: discord.Member):
 
 async def _handle_create_room_join(member: discord.Member, source_channel) -> bool:
     guild = source_channel.guild
+    config, config_error = require_guild_config(guild)
+    if config_error:
+        log.error(f'[TempRoom] {guild.name} is not configured: {config_error}')
+        await safe_send_dm(
+            member,
+            f'Bot chưa được setup trong server này. Báo admin chạy `/admin setup` nhé.',
+            respect_user_setting=False,
+        )
+        return False
+
     bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
     if not bot_member:
         log.error(f'[TempRoom] Cannot resolve bot member in {guild.name}')
         return False
 
     category = None
-    if TEMP_ROOM_CATEGORY_ID:
-        category = guild.get_channel(TEMP_ROOM_CATEGORY_ID)
+    category_id = config.get('temp_room_category_id') if config else None
+    if category_id:
+        category = guild.get_channel(category_id)
         if not isinstance(category, discord.CategoryChannel):
-            log.error(f'[TempRoom] Category {TEMP_ROOM_CATEGORY_ID} not found in {guild.name}')
+            log.error(f'[TempRoom] Category {category_id} not found in {guild.name}')
             await safe_send_dm(
                 member,
-                'Bot không tìm thấy category chứa phòng tạm. Báo admin kiểm tra `TEMP_ROOM_CATEGORY_ID` nhé.',
+                'Bot không tìm thấy category chứa phòng tạm. Báo admin kiểm tra `/admin setup_status` nhé.',
                 respect_user_setting=False,
             )
             return False
@@ -2943,7 +4049,6 @@ async def _handle_focus_leave(member: discord.Member, channel, reason: str = 'r�
     await _force_stop_pomodoro_if_active(member, reason=reason)
     if checkpoint_result.get('level_up'):
         await _ensure_role_synced(member, checkpoint_result['new_level'])
-    await _handle_progress_notifications(member, checkpoint_result, channel)
     duration = await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
     cancel_task(member.id)
     log.info(f'{member.display_name} rời phòng sau {format_time(duration)}')
@@ -2973,6 +4078,7 @@ async def _flush_active_sessions(reason: str = 'shutdown'):
         if mid not in media_active_members and not is_media_active(member.voice):
             continue
         try:
+            _capture_guild_context(member.guild.id)
             _, result = await _do_checkpoint(member)
             if result.get('level_up'):
                 await _ensure_role_synced(member, result['new_level'])
@@ -2984,11 +4090,14 @@ async def _flush_active_sessions(reason: str = 'shutdown'):
 
 async def check_media(member: discord.Member):
     try:
+        _capture_guild_context(member.guild.id)
         await asyncio.sleep(WAIT_SECONDS - WARN_BEFORE_KICK)
         if not (member.voice and member.voice.channel and
                 is_focus_channel(member.voice.channel.id)): return
         if is_media_active(member.voice): return
-        await send_private_notify_embed(
+        notice_channel = member.voice.channel
+        await send_voice_notice(
+            channel=notice_channel,
             member=member,
             title='Cảnh báo',
             description=(
@@ -3009,10 +4118,9 @@ async def check_media(member: discord.Member):
             await _force_stop_pomodoro_if_active(member, reason='bị kick (không bật camera/stream)')
             if checkpoint_result.get('level_up'):
                 await _ensure_role_synced(member, checkpoint_result['new_level'])
-            await _handle_progress_notifications(member, checkpoint_result)
-            await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
-            await member.move_to(None)
-            await send_private_notify_embed(
+            notice_channel = member.voice.channel
+            await send_voice_notice(
+                channel=notice_channel,
                 member=member,
                 title='Đã rời phòng',
                 description=(
@@ -3021,6 +4129,8 @@ async def check_media(member: discord.Member):
                 ),
                 color=NOTIFY_RED,
             )
+            await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
+            await member.move_to(None)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -3091,6 +4201,7 @@ async def checkpoint_task():
             join_times.pop(mid, None)
             last_checkpoint.pop(mid, None)
             milestone_sent.pop(mid, None)
+            runtime_member_guild_ids.pop(mid, None)
             media_active_members.discard(mid)
             reset_cam_notification(mid)
             save_runtime_state()
@@ -3099,13 +4210,15 @@ async def checkpoint_task():
         was_active = mid in media_active_members
         now_active = bool(member.voice and is_media_active(member.voice))
         in_pomo    = mid in pomo_sessions
+        _capture_guild_context(member.guild.id)
+        runtime_member_guild_ids[mid] = member.guild.id
         
         if was_active:
             elapsed, result = await _do_checkpoint(member)
             if result.get('level_up'):
                 await _ensure_role_synced(member, result['new_level'])
             await _handle_progress_notifications(member, result, member.voice.channel)
-            await _check_quests_and_badges(member)
+            await _check_quests_and_badges(member, member.voice.channel)
         
         if now_active and not was_active:
             media_active_members.add(mid)
@@ -3130,97 +4243,109 @@ async def before_checkpoint_task():
 
 # ─── REPORTS ─────────────────────────────────────────────────────────────────
 
-async def _send_report():
-    data        = load_data()
-    today       = datetime.now().strftime('%Y-%m-%d')
-    sorted_data = sorted(data.items(), key=lambda x: x[1].get('daily', {}).get(today, 0), reverse=True)
-    lines       = [f'📊 **Báo cáo ngày {today}**\n']
-    has_data    = False
-    rank        = 0
-    for uid, info in sorted_data:
-        t = info.get('daily', {}).get(today, 0)
-        if t > 0:
-            has_data  = True
-            rank     += 1
-            medal     = ['🥇', '🥈', '🥉'][rank-1] if rank <= 3 else f'`{rank}.`'
-            class_idx = info.get('class', info.get('level', 0))
-            lines.append(
-                f'{medal} **{info["name"]}** `{class_label(class_idx)}` '
-                f'🔥{info.get("streak",0)} — `{format_time(t)}`'
-            )
-    if not has_data: lines.append('😴 Hôm nay chưa có ai học!')
-    chunks      = []
-    current     = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if current_len + line_len > 1900 and current:
+async def _send_report(guild: discord.Guild | None = None):
+    today = datetime.now().strftime('%Y-%m-%d')
+    target_guilds = [guild] if guild else list(bot.guilds)
+    for target_guild in target_guilds:
+        config = get_guild_config(target_guild.id)
+        report_channel_id = config.get('report_channel_id')
+        ch = bot.get_channel(report_channel_id) if report_channel_id else None
+        if not ch:
+            continue
+        with guild_data_context(target_guild.id):
+            data = load_data()
+        sorted_data = sorted(data.items(), key=lambda x: x[1].get('daily', {}).get(today, 0), reverse=True)
+        lines       = [f'📊 **Báo cáo ngày {today}**\n']
+        has_data    = False
+        rank        = 0
+        for uid, info in sorted_data:
+            t = info.get('daily', {}).get(today, 0)
+            if t > 0:
+                has_data  = True
+                rank     += 1
+                medal     = ['🥇', '🥈', '🥉'][rank-1] if rank <= 3 else f'`{rank}.`'
+                class_idx = info.get('class', info.get('level', 0))
+                lines.append(
+                    f'{medal} **{info["name"]}** `{class_label(class_idx)}` '
+                    f'🔥{info.get("streak",0)} — `{format_time(t)}`'
+                )
+        if not has_data: lines.append('😴 Hôm nay chưa có ai học!')
+        chunks      = []
+        current     = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if current_len + line_len > 1900 and current:
+                chunks.append('\n'.join(current))
+                current     = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
             chunks.append('\n'.join(current))
-            current     = [line]
-            current_len = line_len
-        else:
-            current.append(line)
-            current_len += line_len
-    if current:
-        chunks.append('\n'.join(current))
-    for server in SERVERS:
-        ch = bot.get_channel(server['report_channel'])
-        if ch:
-            for chunk in chunks:
-                await ch.send(chunk)
+        for chunk in chunks:
+            await ch.send(chunk)
 
 async def _check_absences():
     today     = datetime.now().strftime('%Y-%m-%d')
     warn_date = (datetime.now() - timedelta(days=ABSENT_DAYS_WARN)).strftime('%Y-%m-%d')
 
-    def claim_absence_warnings(current: dict):
-        warnings = []
-        for uid, info in current.items():
-            last_date   = info.get('last_study_date', '')
-            last_warned = info.get('last_absent_warn', '')
-            if not last_date or last_date >= warn_date or last_warned == today:
-                continue
-            try:
-                member_id = int(uid)
-                last_dt = datetime.strptime(last_date, '%Y-%m-%d')
-            except (ValueError, TypeError):
-                continue
-            member = _get_cached_member(member_id)
-            if not member:
-                continue
-            info['last_absent_warn'] = today
-            warnings.append((member, last_dt, info.get('streak', 0)))
-        return warnings
+    for guild in bot.guilds:
+        def claim_absence_warnings(current: dict):
+            warnings = []
+            for uid, info in current.items():
+                last_date   = info.get('last_study_date', '')
+                last_warned = info.get('last_absent_warn', '')
+                if not last_date or last_date >= warn_date or last_warned == today:
+                    continue
+                try:
+                    member_id = int(uid)
+                    last_dt = datetime.strptime(last_date, '%Y-%m-%d')
+                except (ValueError, TypeError):
+                    continue
+                member = guild.get_member(member_id)
+                if not member:
+                    continue
+                info['last_absent_warn'] = today
+                warnings.append((member, last_dt, info.get('streak', 0)))
+            return warnings
 
-    warnings, _ = update_data(claim_absence_warnings)
-    for member, last_dt, streak in warnings:
-        days = (datetime.now() - last_dt).days
-        await send_private_notify_embed(
-            member=member,
-            title='Nhắc nhở',
-            description=(
-                f'Bạn đã không học trong **{days} ngày**.\n'
-                f'Streak hiện tại: `{streak} ngày`. Vào phòng để giữ nhịp học nhé.'
-            ),
-            color=NOTIFY_GOLD,
-        )
+        with guild_data_context(guild.id):
+            warnings, _ = update_data(claim_absence_warnings)
+        for member, last_dt, streak in warnings:
+            days = (datetime.now() - last_dt).days
+            with guild_data_context(guild.id):
+                await send_private_notify_embed(
+                    member=member,
+                    title='Nhắc nhở',
+                    description=(
+                        f'Bạn đã không học trong **{days} ngày**.\n'
+                        f'Streak hiện tại: `{streak} ngày`. Vào phòng để giữ nhịp học nhé.'
+                    ),
+                    color=NOTIFY_GOLD,
+                )
 
 async def _check_overdue_loan_notifications():
-    data = load_data()
-    for uid, info in data.items():
-        if not isinstance(info, dict):
-            continue
-        if not any(_is_overdue(loan) for loan in _active_loans(info)):
-            continue
-        try:
-            member_id = int(uid)
-        except (TypeError, ValueError):
-            continue
-        member = _get_cached_member(member_id)
-        if member:
-            await notify_overdue_loans(member)
+    for guild in bot.guilds:
+        with guild_data_context(guild.id):
+            data = load_data()
+            for uid, info in data.items():
+                if not isinstance(info, dict):
+                    continue
+                if not any(_is_overdue(loan) for loan in _active_loans(info)):
+                    continue
+                try:
+                    member_id = int(uid)
+                except (TypeError, ValueError):
+                    continue
+                member = guild.get_member(member_id)
+                if member:
+                    await notify_overdue_loans(member)
 
 async def _sync_member_progress(member: discord.Member, previous_level: int | None = None):
+    _capture_guild_context(member.guild.id)
+    notice_channel = _current_voice_notice_channel(member)
     if (
         member.id in join_times
         and member.id in media_active_members
@@ -3229,7 +4354,7 @@ async def _sync_member_progress(member: discord.Member, previous_level: int | No
     ):
         last_checkpoint[member.id] = datetime.now()
         save_runtime_state()
-    await _check_quests_and_badges(member)
+    await _check_quests_and_badges(member, notice_channel)
     if previous_level is None:
         return
     info = load_data().get(str(member.id), {})
@@ -3237,31 +4362,86 @@ async def _sync_member_progress(member: discord.Member, previous_level: int | No
     await _handle_progress_notifications(
         member,
         {'level_up': current_level > previous_level, 'new_level': current_level},
+        notice_channel,
     )
 
 # ─── AI ──────────────────────────────────────────────────────────────────────
 
 AI_SYSTEM_PROMPT = (
     'Bạn là trợ lý học tập trong Discord. '
-    'Trả lời thông minh, ngắn gọn nhưng đủ ý. '
-        'Không viết lan man, không mở bài dài, không lặp lại câu hỏi. '
+    'Trả lời thông minh, súc tích nhưng không hời hợt; giải thích đủ để người học hiểu và áp dụng. '
+    'Không viết lan man, không mở bài dài, không lặp lại câu hỏi, không hiển thị quá trình suy luận nội bộ. '
     'Nếu câu hỏi đơn giản, trả lời trong 2-4 câu. '
-    'Nếu câu hỏi cần giải thích, dùng tối đa 3-6 bullet points. '
-    'Ưu tiên cấu trúc: định nghĩa ngắn → ý chính → ví dụ/công thức nếu cần → kết luận. '
+    'Nếu câu hỏi cần giải thích, dùng tối đa 3-6 bullet points hoặc đoạn ngắn, nêu điều kiện/ngoại lệ quan trọng nếu có. '
+    'Với câu hỏi học tập, ưu tiên cấu trúc: định nghĩa → ý chính → cách áp dụng → ví dụ/công thức ngắn nếu cần → kết luận. '
     f'Câu trả lời phải nằm trong một tin nhắn Discord, khoảng dưới {AI_ONE_MESSAGE_LIMIT} ký tự.'
 )
 AI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+AI_RETRYABLE_ERROR_PATTERNS = (
+    'quota',
+    'rate limit',
+    'rate_limit',
+    'resource_exhausted',
+    'too many requests',
+    'temporarily unavailable',
+    'overloaded',
+)
+AI_AUTH_STATUS_CODES = {401, 403}
+AI_AUTH_ERROR_PATTERNS = (
+    'api key not valid',
+    'invalid api key',
+    'invalid_api_key',
+    'api_key_invalid',
+    'incorrect api key',
+    'invalid authentication',
+    'unauthenticated',
+)
+DEFAULT_AI_PROVIDER_ORDER = ('gemini', 'groq', 'openrouter', 'huggingface')
+AI_PROVIDER_ALIASES = {
+    'groq': 'groq',
+    'gemini': 'gemini',
+    'google': 'gemini',
+    'openrouter': 'openrouter',
+    'open_router': 'openrouter',
+    'huggingface': 'huggingface',
+    'hugging_face': 'huggingface',
+    'hf': 'huggingface',
+}
 
 
 class AIProviderError(Exception):
-    def __init__(self, provider: str, message: str, retryable: bool = False):
+    def __init__(
+        self,
+        provider: str,
+        message: str,
+        retryable: bool = False,
+        auth_failed: bool = False,
+    ):
         super().__init__(message)
         self.provider = provider
         self.retryable = retryable
+        self.auth_failed = auth_failed
 
 
 def _split_env_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(',') if item.strip()]
+
+
+def _configured_ai_provider_order() -> list[str]:
+    order: list[str] = []
+    for item in _split_env_list(AI_PROVIDER_ORDER):
+        normalized = item.strip().lower().replace('-', '_').replace(' ', '_')
+        provider = AI_PROVIDER_ALIASES.get(normalized)
+        if not provider:
+            log.warning(f'Ignoring unknown AI provider in AI_PROVIDER_ORDER: {item}')
+            continue
+        if provider not in order:
+            order.append(provider)
+
+    for provider in DEFAULT_AI_PROVIDER_ORDER:
+        if provider not in order:
+            order.append(provider)
+    return order
 
 
 def smart_cut_at_sentence(text: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
@@ -3289,29 +4469,54 @@ def _openai_compatible_token_limit(provider: dict) -> dict:
     return {token_param: AI_MAX_OUTPUT_TOKENS}
 
 
+def _is_ai_auth_error(status_code: int, body: str) -> bool:
+    normalized = (body or '').lower()
+    if status_code == 401:
+        return True
+    if status_code == 403:
+        return not any(pattern in normalized for pattern in AI_RETRYABLE_ERROR_PATTERNS)
+    return status_code == 400 and any(pattern in normalized for pattern in AI_AUTH_ERROR_PATTERNS)
+
+
+def _is_ai_retryable_error(status_code: int, body: str) -> bool:
+    if status_code in AI_RETRYABLE_STATUS_CODES:
+        return True
+    normalized = (body or '').lower()
+    return status_code in {400, 403} and any(
+        pattern in normalized for pattern in AI_RETRYABLE_ERROR_PATTERNS
+    )
+
+
 def _configured_ai_providers() -> list[dict]:
-    providers: list[dict] = []
-    if GEMINI_API_KEY:
-        providers.extend([
-            {'kind': 'gemini', 'name': 'Gemini 2.5 Flash', 'model': GEMINI_FLASH_MODEL, 'api_key': GEMINI_API_KEY},
-            {'kind': 'gemini', 'name': 'Gemini 2.5 Flash-Lite', 'model': GEMINI_FLASH_LITE_MODEL, 'api_key': GEMINI_API_KEY},
-        ])
+    provider_groups: dict[str, list[dict]] = {
+        'groq': [],
+        'gemini': [],
+        'openrouter': [],
+        'huggingface': [],
+    }
     if GROQ_API_KEY:
         for model in _split_env_list(GROQ_MODELS):
-            providers.append({
+            provider_groups['groq'].append({
                 'kind': 'openai_compatible',
                 'name': f'Groq {model}',
                 'model': model,
                 'api_key': GROQ_API_KEY,
+                'auth_group': 'groq',
                 'base_url': 'https://api.groq.com/openai/v1',
                 'max_token_param': 'max_completion_tokens',
             })
+    if GEMINI_API_KEY:
+        provider_groups['gemini'].extend([
+            {'kind': 'gemini', 'name': 'Gemini 3.5 Flash', 'model': GEMINI_FLASH_MODEL, 'api_key': GEMINI_API_KEY, 'auth_group': 'gemini'},
+            {'kind': 'gemini', 'name': 'Gemini 3.1 Flash-Lite', 'model': GEMINI_FLASH_LITE_MODEL, 'api_key': GEMINI_API_KEY, 'auth_group': 'gemini'},
+        ])
     if OPENROUTER_API_KEY:
-        providers.append({
+        provider_groups['openrouter'].append({
             'kind': 'openai_compatible',
             'name': f'OpenRouter {OPENROUTER_MODEL}',
             'model': OPENROUTER_MODEL,
             'api_key': OPENROUTER_API_KEY,
+            'auth_group': 'openrouter',
             'base_url': 'https://openrouter.ai/api/v1',
             'max_token_param': 'max_tokens',
             'headers': {
@@ -3320,14 +4525,19 @@ def _configured_ai_providers() -> list[dict]:
             },
         })
     if HUGGINGFACE_API_KEY:
-        providers.append({
+        provider_groups['huggingface'].append({
             'kind': 'openai_compatible',
             'name': f'Hugging Face {HUGGINGFACE_MODEL}',
             'model': HUGGINGFACE_MODEL,
             'api_key': HUGGINGFACE_API_KEY,
+            'auth_group': 'huggingface',
             'base_url': 'https://router.huggingface.co/v1',
             'max_token_param': 'max_tokens',
         })
+
+    providers: list[dict] = []
+    for provider_name in _configured_ai_provider_order():
+        providers.extend(provider_groups.get(provider_name, []))
     return providers
 
 
@@ -3337,10 +4547,15 @@ async def _post_ai_json(client: httpx.AsyncClient, provider: str, url: str, head
     except (httpx.TimeoutException, httpx.RequestError) as e:
         raise AIProviderError(provider, f'{type(e).__name__}: {e}', retryable=True) from e
 
-    if response.status_code in AI_RETRYABLE_STATUS_CODES:
-        raise AIProviderError(provider, f'HTTP {response.status_code}: {response.text[:300]}', retryable=True)
+    response_text = response.text[:300]
+    if _is_ai_retryable_error(response.status_code, response.text):
+        raise AIProviderError(provider, f'HTTP {response.status_code}: {response_text}', retryable=True)
     if response.status_code >= 400:
-        raise AIProviderError(provider, f'HTTP {response.status_code}: {response.text[:300]}')
+        raise AIProviderError(
+            provider,
+            f'HTTP {response.status_code}: {response_text}',
+            auth_failed=_is_ai_auth_error(response.status_code, response.text),
+        )
 
     try:
         return response.json()
@@ -3479,15 +4694,22 @@ async def _ask_ai_raw(question: str) -> str:
         return '❌ Thiếu API key AI trong .env. Cần GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY hoặc HF_TOKEN.'
 
     errors: list[AIProviderError] = []
+    failed_auth_groups: set[str] = set()
     async with httpx.AsyncClient(timeout=AI_HTTP_TIMEOUT) as client:
         for provider in providers:
+            auth_group = provider.get('auth_group', provider['name'])
+            if auth_group in failed_auth_groups:
+                log.warning(f'Skipping AI provider {provider["name"]}; auth already failed for {auth_group}.')
+                continue
             try:
                 answer = await _call_ai_provider(client, provider, question)
                 return answer.strip() or '❌ AI không trả về nội dung.'
             except AIProviderError as e:
                 errors.append(e)
+                if e.auth_failed:
+                    failed_auth_groups.add(auth_group)
                 level = logging.WARNING if e.retryable else logging.ERROR
-                log.log(level, f'AI provider failed ({e.provider}, retryable={e.retryable}): {e}')
+                log.log(level, f'AI provider failed ({e.provider}, retryable={e.retryable}, auth_failed={e.auth_failed}): {e}')
             except Exception as e:
                 wrapped = AIProviderError(provider['name'], str(e))
                 errors.append(wrapped)
@@ -3553,7 +4775,8 @@ def _build_rank_message(target: discord.Member, data: dict) -> str:
         pct = int((coin_cur / span) * 100)
         bar_f = int((coin_cur / span) * 20)
     coin_bar = '█' * bar_f + '░' * (20 - bar_f)
-    role_name = _get_level_role_name(LEVEL_ROLES.get(class_idx), target.guild)
+    class_role = _find_class_role_by_level(target.guild, class_idx) if target.guild else None
+    role_name = class_role.name if class_role else None
     role_str  = f'🏷️ Role: **{role_name}**\n' if role_name else ''
     recent    = sorted(info.get('daily', {}).items(), reverse=True)[:5]
     recent_str = ' · '.join([f'`{d[5:]}`{format_time(s)}' for d, s in recent])
@@ -3587,7 +4810,7 @@ async def slash_rank(interaction: discord.Interaction, member: discord.Member = 
     await interaction.response.defer(ephemeral=is_self)
     target = member or interaction.user
     await interaction.followup.send(
-        _build_rank_message(target, _get_live_enriched_data()),
+        _build_rank_message(target, _get_live_enriched_data(interaction.guild)),
         ephemeral=is_self
     )
 
@@ -3607,7 +4830,7 @@ async def slash_quest(interaction: discord.Interaction):
 
         update_data(ensure_user)
 
-    data = _get_live_enriched_data()
+    data = _get_live_enriched_data(interaction.guild)
 
     mid         = interaction.user.id
     saved_secs  = data[uid]['daily'].get(today, 0)
@@ -3654,7 +4877,7 @@ async def slash_badges(interaction: discord.Interaction, member: discord.Member 
                 data.setdefault(uid, _default_user(interaction.user.display_name))
 
             update_data(ensure_user)
-    data   = _get_live_enriched_data()
+    data   = _get_live_enriched_data(interaction.guild)
     if uid not in data:
         await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
@@ -3691,7 +4914,14 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
         await interaction.followup.send(
             '❌ Tính năng `/card` cần **Pillow**: `pip install Pillow`', ephemeral=True
         ); return
-    card_bytes = await asyncio.to_thread(generate_profile_card, target.id)
+    avatar_url = str(target.display_avatar.with_size(256).url) if getattr(target, 'display_avatar', None) else None
+    card_bytes = await asyncio.to_thread(
+        generate_profile_card,
+        target.id,
+        interaction.guild_id,
+        target.display_name,
+        avatar_url,
+    )
     if not card_bytes:
         await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu học tập!', ephemeral=True
@@ -3714,7 +4944,7 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
                 data.setdefault(uid, _default_user(interaction.user.display_name))
 
             update_data(ensure_user)
-    data   = _get_live_enriched_data()
+    data   = _get_live_enriched_data(interaction.guild)
     if uid not in data:
         await interaction.followup.send(
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
@@ -3757,48 +4987,45 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
 
 # ── /leaderboard ───────────────────────────────────────────────────────────
 
-@bot.tree.command(name='leaderboard', description='Bảng xếp hạng hôm nay')
+@bot.tree.command(name='leaderboard', description='Bảng xếp hạng học hôm nay')
 async def slash_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
-    data  = _get_live_enriched_data()
-    today = datetime.now().strftime('%Y-%m-%d')
-    now   = datetime.now()
+    if not PIL_AVAILABLE:
+        await interaction.followup.send(
+            '❌ Tính năng leaderboard ảnh cần **Pillow**: `pip install Pillow`',
+            ephemeral=True,
+        )
+        return
+    entries, today = _build_study_leaderboard_entries(interaction.guild)
+    view = StudyLeaderboardView(interaction.user.id, entries, today)
+    await interaction.followup.send(file=view._image_file(), view=view)
 
-    def real_time(uid_str: str, info: dict) -> int:
-        s = info['daily'].get(today, 0)
-        try:
-            mid = int(uid_str)
-        except (ValueError, TypeError):
-            return s
-        return s + _get_unsaved_study_seconds(mid, now)
 
-    entries = [(u, i, real_time(u, i)) for u, i in data.items()]
-    top10   = sorted(
-        [e for e in entries if e[2] > 0],
-        key=lambda x: x[2], reverse=True
-    )[:10]
+@bot.tree.command(name='study_chart', description='Biểu đồ học tháng này so với tháng trước')
+@app_commands.describe(member='Thành viên (để trống = cả server)')
+async def slash_study_chart(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer()
+    if not PIL_AVAILABLE:
+        await interaction.followup.send(
+            '❌ Tính năng biểu đồ ảnh cần **Pillow**: `pip install Pillow`',
+            ephemeral=True,
+        )
+        return
 
-    lines = [f'🏆 **Bảng xếp hạng hôm nay** _{today}_\n']
-    if not top10:
-        lines.append('😴 Chưa có ai học hôm nay!')
-    else:
-        for i, (uid, info, rt) in enumerate(top10, 1):
-            medal  = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f'`{i}.`'
-            try:
-                is_live = int(uid) in join_times
-            except (ValueError, TypeError):
-                is_live = False
-            active = ' 🟢' if is_live else ''
-            class_idx = info.get('class', info.get('level', 0))
-            earned = info.get('daily_earnings', {}).get(today, 0)
-            debt = _active_debt(info)
-            lines.append(
-                f'{medal}{active} **{info["name"]}** `{class_label(class_idx)}` '
-                f'🔥{info.get("streak",0)} — `{format_time(rt)}`\n'
-                f'       💰 Today `{format_coins(earned)}` · Total `{format_coins(info.get("total_earned",0))}`'
-                f' · Balance `{format_coins(info.get("balance",0))}` · Debt `{format_coins(debt)}`'
-            )
-    await interaction.followup.send('\n'.join(lines))
+    data = _get_live_enriched_data(interaction.guild)
+    subject = interaction.guild.name if interaction.guild else 'Server'
+    if member:
+        uid = str(member.id)
+        data = {uid: data.get(uid, _default_user(member.display_name))}
+        subject = member.display_name
+
+    now = datetime.now()
+    prev_year, prev_month = _previous_month(now.year, now.month)
+    current = _monthly_study_seconds(data, now.year, now.month, interaction.guild)
+    previous = _monthly_study_seconds(data, prev_year, prev_month, interaction.guild)
+    image = render_monthly_study_chart_image(current, previous, now, subject)
+    file = discord.File(io.BytesIO(image), filename='monthly_study_chart.png')
+    await interaction.followup.send(file=file)
 
 # ── /top_alltime ───────────────────────────────────────────────────────────
 
@@ -4367,28 +5594,28 @@ async def loan_history(interaction: discord.Interaction):
         )
     await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
-notify_group = app_commands.Group(name='notify', description='Cài đặt thông báo riêng')
+notify_group = app_commands.Group(name='notify', description='Cài đặt thông báo tự động')
 
-@notify_group.command(name='on', description='Bật thông báo riêng từ bot')
+@notify_group.command(name='on', description='Bật thông báo tự động từ bot')
 async def notify_on(interaction: discord.Interaction):
     display_name = getattr(interaction.user, 'display_name', getattr(interaction.user, 'name', 'Unknown'))
     set_notifications_enabled(interaction.user.id, True, display_name)
-    await interaction.response.send_message('Đã bật thông báo riêng.', ephemeral=True)
+    await interaction.response.send_message('Đã bật thông báo tự động.', ephemeral=True)
 
-@notify_group.command(name='off', description='Tắt thông báo riêng từ bot')
+@notify_group.command(name='off', description='Tắt thông báo tự động từ bot')
 async def notify_off(interaction: discord.Interaction):
     display_name = getattr(interaction.user, 'display_name', getattr(interaction.user, 'name', 'Unknown'))
     set_notifications_enabled(interaction.user.id, False, display_name)
     await interaction.response.send_message(
-        'Đã tắt thông báo riêng. Bot sẽ không gửi DM thông báo tự động cho bạn.',
+        'Đã tắt thông báo tự động. Bot sẽ bỏ qua thông báo chủ động cho bạn.',
         ephemeral=True,
     )
 
-@notify_group.command(name='status', description='Xem trạng thái thông báo riêng')
+@notify_group.command(name='status', description='Xem trạng thái thông báo tự động')
 async def notify_status(interaction: discord.Interaction):
     enabled = notifications_enabled_for(interaction.user.id)
     await interaction.response.send_message(
-        f"Thông báo riêng hiện đang: **{'Bật' if enabled else 'Tắt'}**",
+        f"Thông báo tự động hiện đang: **{'Bật' if enabled else 'Tắt'}**",
         ephemeral=True,
     )
 
@@ -4406,7 +5633,7 @@ async def slash_studying(interaction: discord.Interaction):
     if not guild:
         await interaction.followup.send('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
         return
-    data  = _get_live_enriched_data()
+    data  = _get_live_enriched_data(guild)
     today = now.strftime('%Y-%m-%d')
     lines = ['🟢 **Đang học ngay lúc này**\n']
     count = 0
@@ -4509,6 +5736,7 @@ async def slash_ask(interaction: discord.Interaction, question: str):
 # ── /room_panel ────────────────────────────────────────────────────────────
 
 def _resolve_room_control_channel(interaction: discord.Interaction) -> tuple[discord.VoiceChannel | None, str | None]:
+    _capture_guild_context(interaction.guild_id)
     if not interaction.guild:
         return None, '❌ Chức năng này chỉ dùng được trong server.'
 
@@ -4520,7 +5748,7 @@ def _resolve_room_control_channel(interaction: discord.Interaction) -> tuple[dis
     if not _is_temporary_room_id(channel.id):
         return None, '❌ Điều khiển này chỉ áp dụng cho phòng tạm do bot tạo.'
 
-    meta = temp_rooms.get(channel.id, {})
+    meta = _temp_room_meta(channel.id, interaction.guild.id)
     is_owner = meta.get('owner_id') == member.id
     is_admin = member.guild_permissions.manage_channels
     if not (is_owner or is_admin):
@@ -4548,6 +5776,7 @@ class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _capture_guild_context(interaction.guild_id)
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể đổi tên phòng.')
@@ -4580,6 +5809,7 @@ async def _call_pomodoro_command(
     command_name: str,
     *args,
 ):
+    _capture_guild_context(interaction.guild_id)
     pomo_cog = bot.cogs.get('PomodoroCog')
     command = getattr(pomo_cog, command_name, None) if pomo_cog else None
     callback = getattr(command, 'callback', None)
@@ -4604,6 +5834,7 @@ class _SilentPomodoroChannel:
 
 
 async def _panel_pomodoro_start(interaction: discord.Interaction):
+    _capture_guild_context(interaction.guild_id)
     pomo_cog = bot.cogs.get('PomodoroCog')
     if not pomo_cog:
         await interaction.response.send_message('❌ Pomodoro chưa sẵn sàng. Thử lại sau nhé.', ephemeral=True)
@@ -4662,6 +5893,7 @@ async def _panel_pomodoro_status(interaction: discord.Interaction):
 
 
 async def _panel_show_balance(interaction: discord.Interaction):
+    _capture_guild_context(interaction.guild_id)
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
     display_name = _interaction_display_name(interaction)
@@ -4689,6 +5921,7 @@ async def _panel_show_balance(interaction: discord.Interaction):
 
 
 async def _panel_loan_status(interaction: discord.Interaction):
+    _capture_guild_context(interaction.guild_id)
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
     display_name = _interaction_display_name(interaction)
@@ -4745,6 +5978,7 @@ class BorrowModal(discord.ui.Modal, title='🏦 Vay coins ảo'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _capture_guild_context(interaction.guild_id)
         amount, error = _parse_positive_int(str(self.amount.value), 'Số coins')
         if error:
             await interaction.response.send_message(f'❌ {error}', ephemeral=True)
@@ -4782,6 +6016,7 @@ class RepayModal(discord.ui.Modal, title='💳 Trả nợ'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _capture_guild_context(interaction.guild_id)
         amount, error = _parse_positive_int(str(self.amount.value), 'Số coins')
         if error:
             await interaction.response.send_message(f'❌ {error}', ephemeral=True)
@@ -4836,6 +6071,7 @@ class LendModal(discord.ui.Modal, title='🤝 Cho vay coins ảo'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _capture_guild_context(interaction.guild_id)
         amount, error = _parse_positive_int(str(self.amount.value), 'Số coins')
         if error:
             await interaction.response.send_message(f'❌ {error}', ephemeral=True)
@@ -5060,10 +6296,9 @@ async def slash_roles(interaction: discord.Interaction):
         f'Bạn: `{class_label(my_lv)}` · Balance `{format_coins(my_balance)}` · '
         f'Total earned `{format_coins(my_earned)}` · Debt `{format_coins(my_debt)}`\n',
     ]
-    for lv, role_id in LEVEL_ROLES.items():
-        if role_id is None:
-            continue
-        role_name = _get_level_role_name(role_id, guild) or f'Unknown ({role_id})'
+    for lv, default_role_name in CLASS_ROLE_NAMES.items():
+        role = _find_class_role_by_level(guild, lv) if guild else None
+        role_name = role.name if role else default_role_name
         coins_req = CLASS_THRESHOLDS[lv]
         is_mine = (lv == my_lv)
         is_done = (my_lv > lv)
@@ -5119,11 +6354,292 @@ async def slash_help(interaction: discord.Interaction):
         '`/weekly leaderboard` — Top học nhiều nhất tuần này\n'
         '`/weekly compare` — So sánh tuần này vs tuần trước\n\n'
         '**⚙️ Admin**\n'
+        '`/admin setup` · `/admin setup_status` · `/admin setup_roles` · `/admin db_status` · `/admin migrate_json_to_db` · `/admin backup_db`\n'
         '`/syncroles` · `/report` · `/dailyboard` · `/updatelive` · `/backup` · `/economy adjust`\n'
     )
     await interaction.followup.send(msg, ephemeral=True)
 
 # ── Admin commands ─────────────────────────────────────────────────────────
+
+admin_group = app_commands.Group(name='admin', description='Quản trị bot')
+
+
+def _parse_channel_id_list(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    ids: list[int] = []
+    for match in re.findall(r'\d{15,25}', raw):
+        channel_id = _as_int(match)
+        if channel_id and channel_id not in ids:
+            ids.append(channel_id)
+    return ids
+
+
+def _format_config_channel(guild: discord.Guild, channel_id: int | None) -> str:
+    if not channel_id:
+        return '`chưa set`'
+    channel = guild.get_channel(int(channel_id))
+    return channel.mention if channel and hasattr(channel, 'mention') else f'`{channel_id}` (không tìm thấy)'
+
+
+def _format_config_role(guild: discord.Guild, role_id: int | None) -> str:
+    if not role_id:
+        return '`chưa set`'
+    role = guild.get_role(int(role_id))
+    return role.mention if role else f'`{role_id}` (không tìm thấy)'
+
+
+def _admin_role_allowed(interaction: discord.Interaction) -> bool:
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return False
+    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+        return True
+    config = get_guild_config(interaction.guild_id) if interaction.guild_id else {}
+    admin_role_id = config.get('admin_role_id')
+    return bool(admin_role_id and any(role.id == admin_role_id for role in member.roles))
+
+
+async def _require_admin(interaction: discord.Interaction) -> bool:
+    if _admin_role_allowed(interaction):
+        return True
+    message = 'Bạn cần quyền Administrator/Manage Server hoặc role admin đã setup để dùng lệnh này.'
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+    return False
+
+
+def _guild_setup_status_lines(guild: discord.Guild, config: dict) -> list[str]:
+    bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    focus_ids = [int(ch_id) for ch_id in config.get('focus_channel_ids') or [] if _as_int(ch_id)]
+    lines = [
+        f'Guild: **{guild.name}** (`{guild.id}`)',
+        f'Create-room voice: {_format_config_channel(guild, config.get("create_room_channel_id"))}',
+        f'Temp room category: {_format_config_channel(guild, config.get("temp_room_category_id"))}',
+        f'Report channel: {_format_config_channel(guild, config.get("report_channel_id"))}',
+        f'Admin role: {_format_config_role(guild, config.get("admin_role_id"))}',
+        f'Coins/minute: `{_as_int(config.get("coins_per_minute"), COINS_PER_MINUTE)}`',
+        f'Focus rooms: `{len(focus_ids)}` configured',
+    ]
+    if bot_member:
+        lines.append(f'Manage Roles: `{"yes" if bot_member.guild_permissions.manage_roles else "no"}`')
+        lines.append(f'Manage Channels: `{"yes" if bot_member.guild_permissions.manage_channels else "no"}`')
+        lines.append(f'Move Members: `{"yes" if bot_member.guild_permissions.move_members else "no"}`')
+    role_ids = _persisted_class_role_ids(guild.id)
+    lines.append(f'Class roles saved: `{len(role_ids)}/{len(CLASS_ROLE_NAMES)}`')
+    unmanageable = _unmanageable_class_roles(guild, role_ids)
+    if unmanageable:
+        lines.append('Role hierarchy warning: ' + ', '.join(role.name for role in unmanageable[:5]))
+    return lines
+
+
+def _apply_legacy_env_config_if_empty(guild: discord.Guild) -> dict:
+    config = get_guild_config(guild.id)
+    updates = {}
+    if (
+        LEGACY_CREATE_ROOM_CHANNEL_ID
+        and not config.get('create_room_channel_id')
+        and guild.get_channel(LEGACY_CREATE_ROOM_CHANNEL_ID)
+    ):
+        updates['create_room_channel_id'] = LEGACY_CREATE_ROOM_CHANNEL_ID
+    if (
+        LEGACY_TEMP_ROOM_CATEGORY_ID
+        and not config.get('temp_room_category_id')
+        and guild.get_channel(LEGACY_TEMP_ROOM_CATEGORY_ID)
+    ):
+        updates['temp_room_category_id'] = LEGACY_TEMP_ROOM_CATEGORY_ID
+    if updates:
+        config = save_guild_config(guild.id, updates)
+    return config
+
+
+@admin_group.command(name='setup', description='Lưu cấu hình server hiện tại')
+@app_commands.describe(
+    create_room_channel='Voice channel người dùng join để bot tạo phòng học tạm',
+    temp_room_category='Category chứa các phòng học tạm',
+    report_channel='Text channel nhận báo cáo/livestream thống kê',
+    admin_role='Role được phép chạy lệnh admin của bot',
+    coins_per_minute='Số coins cộng mỗi phút học trong server này',
+    focus_channels='Tùy chọn: ID/mention các phòng học cố định, cách nhau bằng dấu phẩy',
+)
+async def admin_setup(
+    interaction: discord.Interaction,
+    create_room_channel: discord.VoiceChannel,
+    temp_room_category: discord.CategoryChannel,
+    report_channel: discord.TextChannel,
+    admin_role: discord.Role,
+    coins_per_minute: int = None,
+    focus_channels: str = None,
+):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+
+    if create_room_channel.guild.id != guild.id or temp_room_category.guild.id != guild.id or report_channel.guild.id != guild.id:
+        await interaction.followup.send('Các channel/category phải thuộc server hiện tại.', ephemeral=True)
+        return
+    if admin_role.guild.id != guild.id:
+        await interaction.followup.send('Admin role phải thuộc server hiện tại.', ephemeral=True)
+        return
+
+    current = get_guild_config(guild.id)
+    focus_ids = _parse_channel_id_list(focus_channels)
+    if not focus_ids:
+        focus_ids = [int(ch_id) for ch_id in current.get('focus_channel_ids') or [] if _as_int(ch_id)]
+    coin_rate = _as_int(coins_per_minute, _as_int(current.get('coins_per_minute'), COINS_PER_MINUTE))
+    coin_rate = max(0, coin_rate)
+
+    config = save_guild_config(guild.id, {
+        'create_room_channel_id': create_room_channel.id,
+        'temp_room_category_id': temp_room_category.id,
+        'report_channel_id': report_channel.id,
+        'admin_role_id': admin_role.id,
+        'coins_per_minute': coin_rate,
+        'focus_channel_ids': focus_ids,
+    })
+
+    await interaction.followup.send(
+        'Đã lưu cấu hình server.\n' + '\n'.join(_guild_setup_status_lines(guild, config)),
+        ephemeral=True,
+    )
+
+
+@admin_group.command(name='setup_status', description='Xem cấu hình server hiện tại')
+async def admin_setup_status(interaction: discord.Interaction):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    config = _apply_legacy_env_config_if_empty(guild)
+    await interaction.followup.send('\n'.join(_guild_setup_status_lines(guild, config)), ephemeral=True)
+
+
+@admin_group.command(name='setup_roles', description='Tạo và đồng bộ class roles')
+async def admin_setup_roles(interaction: discord.Interaction):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
+        return
+
+    bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if not bot_member:
+        await interaction.followup.send('❌ Bot chưa đọc được thông tin member của chính nó.', ephemeral=True)
+        return
+    if not bot_member.guild_permissions.manage_roles:
+        await interaction.followup.send(
+            '❌ Bot thiếu quyền **Manage Roles**. Hãy cấp quyền rồi chạy lại `/admin setup_roles`.',
+            ephemeral=True,
+        )
+        return
+
+    role_ids = await ensure_class_roles(guild)
+    if not role_ids:
+        await interaction.followup.send(
+            '❌ Không tạo hoặc tìm thấy class role nào. Kiểm tra quyền role của bot rồi thử lại.',
+            ephemeral=True,
+        )
+        return
+
+    updated, skipped = await _sync_guild_class_members(guild, role_ids)
+    unmanageable = _unmanageable_class_roles(guild, role_ids)
+    msg = (
+        f'✅ Đã setup **{len(role_ids)}/{len(CLASS_ROLE_NAMES)}** class roles '
+        f'và sync **{updated}** thành viên.'
+    )
+    if skipped:
+        msg += f' ⚠️ Bỏ qua **{skipped}** (không tìm thấy trong server).'
+    if unmanageable:
+        role_list = ', '.join(role.name for role in unmanageable[:5])
+        msg += (
+            '\n⚠️ Bot chưa thể gán một số role vì role bot không cao hơn: '
+            f'**{role_list}**. Hãy kéo role bot lên trên các class roles.'
+        )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@admin_group.command(name='db_status', description='Xem trạng thái database')
+async def admin_db_status(interaction: discord.Interaction):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        status = repository.db_status()
+    except Exception as e:
+        await interaction.followup.send(f'Lỗi đọc database: `{e}`', ephemeral=True)
+        return
+
+    counts = status.get('counts', {})
+    count_text = ', '.join(f'{name}={count}' for name, count in sorted(counts.items()))
+    lines = [
+        f'Backend: `{status.get("backend")}`',
+        f'Path: `{status.get("path")}`',
+        f'Exists: `{status.get("exists")}` · Size: `{status.get("size_bytes", 0):,}` bytes',
+        f'Rows: {count_text or "`none`"}',
+    ]
+    await interaction.followup.send('\n'.join(lines), ephemeral=True)
+
+
+@admin_group.command(name='migrate_json_to_db', description='Backup JSON cũ và migrate vào database')
+async def admin_migrate_json_to_db(interaction: discord.Interaction):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    try:
+        result = repository.migrate_json_to_db(
+            guild.id,
+            study_data_path=DATA_FILE,
+            guild_config_path=BASE_DIR / 'guild_config.json',
+            runtime_state_path=RUNTIME_STATE_FILE,
+            role_config_path=ROLE_CONFIG_FILE,
+            backup_dir=BACKUP_DIR,
+            normalize_fn=_normalize_all_users,
+        )
+        _apply_legacy_env_config_if_empty(guild)
+    except Exception as e:
+        log.error(f'[DB] JSON migration failed for {guild.name}: {e}', exc_info=True)
+        await interaction.followup.send(f'Migration thất bại: `{e}`', ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        'Migration hoàn tất.\n'
+        f'Users inserted: `{result.get("inserted_users", 0)}` · skipped: `{result.get("skipped_users", 0)}`\n'
+        f'Guild config: `{result.get("migrated_guild_config")}` · class roles: `{result.get("migrated_roles", 0)}` · runtime: `{result.get("migrated_runtime")}`\n'
+        f'Backups: `{len(result.get("backups", []))}` file(s) trong `{BACKUP_DIR}`',
+        ephemeral=True,
+    )
+
+
+@admin_group.command(name='backup_db', description='Backup SQLite database ngay lập tức')
+async def admin_backup_db(interaction: discord.Interaction):
+    if not await _require_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        dest = repository.backup_db(BACKUP_DIR)
+    except Exception as e:
+        await interaction.followup.send(f'Backup DB thất bại: `{e}`', ephemeral=True)
+        return
+    await interaction.followup.send(f'Đã backup DB: `{dest}`', ephemeral=True)
+
+
+bot.tree.add_command(admin_group)
+
 
 @bot.tree.command(name='syncroles', description='Đồng bộ vai trò (Admin)')
 @app_commands.default_permissions(administrator=True)
@@ -5133,41 +6649,39 @@ async def slash_syncroles(interaction: discord.Interaction):
     if not guild:
         await interaction.followup.send('❌ Lệnh này chỉ dùng được trong server!', ephemeral=True)
         return
-    data    = load_data()
-    updated = 0
-    skipped = 0
-    members_to_sync: list[tuple[discord.Member, int]] = []
-    for uid, info in data.items():
-        try:
-            member_id = int(uid)
-        except (ValueError, TypeError):
-            continue
-        m = guild.get_member(member_id) or await _fetch_member_from_guild(guild, member_id)
-        if not m:
-            skipped += 1
-            continue
-        members_to_sync.append((m, info.get('class', info.get('level', 0))))
-        updated += 1
-
-    batches = list(_iter_chunks(members_to_sync, ROLE_SYNC_BATCH_SIZE))
-    for idx, batch in enumerate(batches):
-        await asyncio.gather(
-            *[_ensure_role_synced(m, lv) for m, lv in batch],
-            return_exceptions=True,
+    bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if not bot_member:
+        await interaction.followup.send('❌ Bot chưa đọc được thông tin member của chính nó.', ephemeral=True)
+        return
+    if not bot_member.guild_permissions.manage_roles:
+        await interaction.followup.send(
+            '❌ Bot thiếu quyền **Manage Roles**. Hãy cấp quyền rồi chạy lại `/syncroles`.',
+            ephemeral=True,
         )
-        if idx < len(batches) - 1:
-            await asyncio.sleep(ROLE_SYNC_BATCH_DELAY)
+        return
+    role_ids = await ensure_class_roles(guild)
+    if not role_ids:
+        await interaction.followup.send(
+            '❌ Không setup được class roles. Kiểm tra role bot rồi thử lại.',
+            ephemeral=True,
+        )
+        return
+    updated, skipped = await _sync_guild_class_members(guild, role_ids)
 
     msg = f'✅ Đã sync **{updated}** thành viên.'
     if skipped:
         msg += f' ⚠️ Bỏ qua **{skipped}** (không tìm thấy trong server).'
+    unmanageable = _unmanageable_class_roles(guild, role_ids)
+    if unmanageable:
+        role_list = ', '.join(role.name for role in unmanageable[:5])
+        msg += f'\n⚠️ Role bot cần nằm cao hơn: **{role_list}**.'
     await interaction.followup.send(msg, ephemeral=True)
 
 @bot.tree.command(name='report', description='Gửi báo cáo ngay (Admin)')
 @app_commands.default_permissions(administrator=True)
 async def slash_report(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    await _send_report()
+    await _send_report(interaction.guild)
     await interaction.followup.send('✅ Đã gửi báo cáo!', ephemeral=True)
 
 @bot.tree.command(name='dailyboard', description='Gửi bảng tổng kết ngày (Admin)')
@@ -5184,14 +6698,17 @@ async def slash_dailyboard(interaction: discord.Interaction, date: str = None):
             )
             return
     await interaction.response.defer(ephemeral=True)
-    await _send_daily_board(date)
+    await _send_daily_board(date, interaction.guild)
     await interaction.followup.send('✅ Đã gửi bảng tổng kết ngày!', ephemeral=True)
 
 @bot.tree.command(name='updatelive', description='Cập nhật live message (Admin)')
 @app_commands.default_permissions(administrator=True)
 async def slash_updatelive(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    await update_all_live_messages()
+    if interaction.guild:
+        await update_live_message(interaction.guild)
+    else:
+        await update_all_live_messages()
     await interaction.followup.send('✅ Đã cập nhật!', ephemeral=True)
 
 @bot.tree.command(name='backup', description='Backup dữ liệu ngay lập tức (Admin)')
@@ -5235,7 +6752,7 @@ async def cmd_stats(ctx, member: discord.Member = None):
 
 @bot.command(name='leaderboard', aliases=['lb', 'top'])
 async def cmd_leaderboard(ctx):
-    data  = _get_live_enriched_data()
+    data  = _get_live_enriched_data(ctx.guild)
     today = datetime.now().strftime('%Y-%m-%d')
     now   = datetime.now()
 
@@ -5332,7 +6849,7 @@ async def cmd_sync(ctx):
 @bot.command(name='report')
 @commands.has_permissions(administrator=True)
 async def cmd_report(ctx):
-    await _send_report()
+    await _send_report(ctx.guild)
     await ctx.send('✅ Đã gửi báo cáo!')
 
 # ─── EVENTS ──────────────────────────────────────────────────────────────────
@@ -5370,6 +6887,9 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_ready():
     log.info(f'✅ Bot {bot.user.name} ready!')
+    initialize_database()
+    for guild in bot.guilds:
+        _apply_legacy_env_config_if_empty(guild)
     if not join_times:
         restore_runtime_state()
 
@@ -5398,6 +6918,7 @@ async def on_ready():
                 update_data_fn=update_data,
                 class_thresholds=CLASS_THRESHOLDS,
                 class_names=CLASS_NAMES,
+                guild_context_fn=guild_data_context,
             )
         except Exception as e:
             log.error(f'WeeklyReport error: {e}', exc_info=True)
@@ -5417,6 +6938,13 @@ async def on_ready():
         except Exception as e:
             log.error(f'Sync error {guild.name}: {e}')
 
+    guild_class_role_ids: dict[int, dict[int, int]] = {}
+    for guild in bot.guilds:
+        try:
+            guild_class_role_ids[guild.id] = await ensure_class_roles(guild)
+        except Exception as e:
+            log.error(f'[RoleSetup] Startup setup failed in {guild.name}: {e}', exc_info=True)
+
     if not scheduled_tasks.is_running():  scheduled_tasks.start()
     if not checkpoint_task.is_running():  checkpoint_task.start()
 
@@ -5427,39 +6955,39 @@ async def on_ready():
     log.info(f'🌐 Dashboard: http://localhost:{DASHBOARD_PORT}')
 
     # Restore remind tasks and sync roles on recovery
-    data = load_data()
     members_to_sync: list[tuple[discord.Member, int]] = []
-    for uid, info in data.items():
-        try:
-            mid = int(uid)
-        except (ValueError, TypeError):
-            continue
-        
-        # Restore reminders
-        remind_h = info.get('remind_hour')
-        if remind_h is not None:
-            await _cancel_reminder_task(mid)
-            for guild in bot.guilds:
-                m = guild.get_member(mid)
-                if m:
-                    if mid in remind_tasks:
-                        break
-                    t = asyncio.create_task(_remind_loop(m, remind_h))
-                    remind_tasks[mid] = (remind_h, t)
-                    log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00')
-                    break
-        
-        # Collect members for batched role sync
-        level = info.get('class', info.get('level', 0))
-        for guild in bot.guilds:
-            m = guild.get_member(mid)
-            if m:
-                members_to_sync.append((m, level))
-                break
+    for guild in bot.guilds:
+        with guild_data_context(guild.id):
+            data = load_data()
+        for uid, info in data.items():
+            try:
+                mid = int(uid)
+            except (ValueError, TypeError):
+                continue
+
+            member = guild.get_member(mid)
+            if not member:
+                continue
+
+            # Restore reminders
+            remind_h = info.get('remind_hour')
+            if remind_h is not None and mid not in remind_tasks:
+                await _cancel_reminder_task(mid)
+                t = asyncio.create_task(_remind_loop(member, remind_h))
+                remind_tasks[mid] = (remind_h, t)
+                log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00 trong {guild.name}')
+
+            # Collect members for batched role sync
+            level = info.get('class', info.get('level', 0))
+            members_to_sync.append((member, level))
 
     async def _safe_sync(member: discord.Member, level: int):
         try:
-            await _ensure_role_synced(member, level)
+            await _ensure_role_synced(
+                member,
+                level,
+                role_ids=guild_class_role_ids.get(member.guild.id),
+            )
         except Exception as e:
             log.error(f'[RoleSync] on_ready sync failed for {member.display_name}: {e}')
 
@@ -5476,9 +7004,11 @@ async def on_ready():
 
     # Reconcile runtime state with current voice members on reconnect/restart.
     current_focus_members: dict[int, discord.Member] = {}
-    for ch_id in FOCUS_CHANNEL_IDS:
-        ch = bot.get_channel(ch_id)
-        if ch:
+    for guild in bot.guilds:
+        for ch_id in _guild_focus_channel_ids(guild):
+            ch = bot.get_channel(ch_id)
+            if not isinstance(ch, discord.VoiceChannel):
+                continue
             for m in ch.members:
                 if m.bot:
                     continue
@@ -5490,8 +7020,10 @@ async def on_ready():
             join_times.pop(mid, None)
             last_checkpoint.pop(mid, None)
             milestone_sent.pop(mid, None)
+            runtime_member_guild_ids.pop(mid, None)
             media_active_members.discard(mid)
             continue
+        runtime_member_guild_ids[mid] = m.guild.id
         if m.voice and is_media_active(m.voice):
             media_active_members.add(mid)
         else:
@@ -5505,7 +7037,8 @@ async def on_ready():
         if not (m.voice and is_media_active(m.voice)):
             start_check(m, 'bot restart – no cam/stream')
 
-    for room_id in list(temp_rooms.keys()):
+    for meta in list(temp_rooms.values()):
+        room_id = _as_int(meta.get('room_id'))
         channel = bot.get_channel(room_id)
         if not isinstance(channel, discord.VoiceChannel):
             _remove_temporary_room_tracking(room_id)
@@ -5524,6 +7057,7 @@ async def on_disconnect():
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if member.bot: return
+    _capture_guild_context(member.guild.id)
     joined_create_room = (
         _is_create_room_channel(after.channel)
         and (not before.channel or before.channel.id != after.channel.id)
@@ -5550,6 +7084,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         in_pomodoro = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
         if not was_active and now_active:
             cancel_task(member.id)
+            runtime_member_guild_ids[member.id] = member.guild.id
             media_active_members.add(member.id)
             if member.id not in join_times:
                 record_join(member)
@@ -5572,13 +7107,14 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 if result.get('level_up'):
                     await _ensure_role_synced(member, result['new_level'])
                 await _handle_progress_notifications(member, result, after.channel)
-                await _check_quests_and_badges(member)
+                await _check_quests_and_badges(member, after.channel)
                 media_active_members.discard(member.id)
                 save_runtime_state()
             start_check(member, 'tắt Cam/Stream')
-            await send_private_notify_embed(
+            await send_voice_notice(
+                channel=after.channel,
                 member=member,
-                title='Nhắc nhở',
+                title='Cảnh báo',
                 description=(
                     f'Bạn cần bật lại Cam hoặc Stream trong {WAIT_SECONDS}s '
                     'để tiếp tục ở lại phòng.'
@@ -5588,22 +7124,33 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     elif joined_focus and not stayed_in_focus:
         record_join(member)
-        await send_private_notify_embed(
+        await send_voice_notice(
+            channel=after.channel,
             member=member,
             title='Chào mừng',
             description=(
-                f'Chào mừng {member.display_name} vào phòng học.\n'
-                f'Nhớ bật Cam hoặc Stream trong {WAIT_SECONDS}s để ở lại.'
+                f'Chào mừng {member.display_name} vào phòng học.'
             ),
             color=NOTIFY_BLUE,
         )
-        await send_private_notify_embed(
+        await send_voice_notice(
+            channel=after.channel,
             member=member,
             title='Động lực hôm nay',
             description=_random_motivation_plain(),
             color=NOTIFY_BLUE,
         )
         if not is_media_active(after):
+            await send_voice_notice(
+                channel=after.channel,
+                member=member,
+                title='Nhắc nhở',
+                description=(
+                    f'Bạn cần bật Cam hoặc Stream trong {WAIT_SECONDS}s '
+                    'để bắt đầu tính giờ và ở lại phòng.'
+                ),
+                color=NOTIFY_GOLD,
+            )
             start_check(member, 'vào phòng không có Cam/Stream')
         else:
             await notify_cam_started(member, after.channel)
@@ -5782,7 +7329,14 @@ def dashboard(): return render_template_string(DASHBOARD_HTML)
 
 @flask_app.route('/api/stats')
 def api_stats():
-    return jsonify(load_data())
+    merged: dict[str, dict] = {}
+    for guild_id, data in load_all_guild_data().items():
+        for uid, info in data.items():
+            key = uid if uid not in merged else f'{guild_id}:{uid}'
+            row = deepcopy(info)
+            row['_guild_id'] = guild_id
+            merged[key] = row
+    return jsonify(merged)
 
 @flask_app.route('/api/live')
 def api_live():
@@ -5806,20 +7360,29 @@ def _update_live_cache():
     global _live_state_cache
     now   = datetime.now()
     today = now.strftime('%Y-%m-%d')
-    data  = _get_live_enriched_data()
     result = []
     for mid, start in list(join_times.items()):
+        member_guild = None
+        member_obj = None
+        for guild in bot.guilds:
+            m = guild.get_member(mid)
+            if m:
+                member_guild = guild
+                member_obj = m
+                break
+        if member_guild is None or member_obj is None:
+            log.info(f'[Dashboard] Skipping stale live cache entry for member_id={mid}; member not found in current guilds.')
+            continue
+        with guild_data_context(member_guild.id):
+            data = _get_live_enriched_data(member_guild)
         uid      = str(mid)
         info     = data.get(uid, {})
         saved    = info.get('daily', {}).get(today, 0)
         unsaved = _get_unsaved_study_seconds(mid, now)
         is_stream = is_video = False
-        for guild in bot.guilds:
-            m = guild.get_member(mid)
-            if m and m.voice:
-                is_stream = bool(m.voice.self_stream)
-                is_video  = bool(m.voice.self_video)
-                break
+        if member_obj and member_obj.voice:
+            is_stream = bool(member_obj.voice.self_stream)
+            is_video  = bool(member_obj.voice.self_video)
         result.append({
             'name':         info.get('name', f'User {mid}'),
             'level':        info.get('class', info.get('level', 0)),

@@ -16,6 +16,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      AI_PROVIDER_ORDER: ${AI_PROVIDER_ORDER:-gemini,groq,openrouter,huggingface}
       GROQ_MODELS: ${GROQ_MODELS:-llama-3.3-70b-versatile,qwen/qwen3-32b}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-oss-20b:free}
@@ -26,11 +27,11 @@ services:
       HUGGING_FACE_API_KEY: ${HUGGING_FACE_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
       HUGGINGFACE_MODEL: ${HUGGINGFACE_MODEL:-deepseek-ai/DeepSeek-R1:fastest}
-      GEMINI_FLASH_MODEL: ${GEMINI_FLASH_MODEL:-gemini-2.5-flash}
-      GEMINI_FLASH_LITE_MODEL: ${GEMINI_FLASH_LITE_MODEL:-gemini-2.5-flash-lite}
+      GEMINI_FLASH_MODEL: ${GEMINI_FLASH_MODEL:-gemini-3.5-flash}
+      GEMINI_FLASH_LITE_MODEL: ${GEMINI_FLASH_LITE_MODEL:-gemini-3.1-flash-lite}
       AI_HTTP_TIMEOUT: ${AI_HTTP_TIMEOUT:-45}
       AI_ONE_MESSAGE_LIMIT: ${AI_ONE_MESSAGE_LIMIT:-1750}
-      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-900}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-1300}
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
       DATA_DIR: /data
       DASHBOARD_PORT: ${DASHBOARD_PORT:-5000}

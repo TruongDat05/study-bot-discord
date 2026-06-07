@@ -21,6 +21,7 @@ import discord.ext.commands
 from datetime import datetime, timedelta
 import logging
 import asyncio
+from contextlib import AbstractContextManager, nullcontext
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +228,7 @@ def _build_weekly_dm(
 
     chart_lines = []
     for i, (day, secs) in enumerate(zip(day_names, daily_secs)):
-        bar          = _ascii_bar(secs // 60, max_day // 60, width=10)
+        bar          = _ascii_bar(secs, max_day, width=10)
         time_s       = _format_time(secs) if secs > 0 else '—'
         today_marker = ' ◀ hôm nay' if this_week[i] == today_str else ''
         emoji        = _day_emoji(i)
@@ -283,8 +284,22 @@ def create_weekly_report_cog(
     update_data_fn=None,
     class_thresholds=None,
     class_names=None,
+    guild_context_fn=None,
 ):
     configure_class_config(class_thresholds, class_names)
+
+    def get_guild_context(guild_id: int | None) -> AbstractContextManager:
+        if guild_context_fn is None:
+            return nullcontext()
+        context = guild_context_fn(guild_id)
+        if not hasattr(context, '__enter__') or not hasattr(context, '__exit__'):
+            message = (
+                'guild_context_fn must return a synchronous context manager; '
+                f'got {type(context).__name__} for guild_id={guild_id}'
+            )
+            log.error('[WeeklyReport] %s', message)
+            raise TypeError(message)
+        return context
 
     class WeeklyReportCog(discord.ext.commands.Cog, name='WeeklyReport'):
 
@@ -481,8 +496,8 @@ def create_weekly_report_cog(
             lines.append(f'`{"Ngày":<4}` `{"Tuần này":>9}` `{"Tuần trước":>10}`')
             lines.append('─' * 32)
             for i, day in enumerate(day_names):
-                this_bar = _ascii_bar(this_days[i] // 60, max_val // 60, width=5)
-                last_bar = _ascii_bar(last_days[i] // 60, max_val // 60, width=5)
+                this_bar = _ascii_bar(this_days[i], max_val, width=5)
+                last_bar = _ascii_bar(last_days[i], max_val, width=5)
                 this_t   = _format_time(this_days[i]) if this_days[i] > 0 else '—'
                 last_t   = _format_time(last_days[i]) if last_days[i] > 0 else '—'
                 lines.append(f'`{day}` `{this_bar}` {this_t:<8} `{last_bar}` {last_t}')
@@ -602,49 +617,51 @@ def create_weekly_report_cog(
             self,
             specific_member: discord.Member = None,
         ) -> tuple[int, int]:
-            data      = load_data_fn()
             this_week = _week_dates(0)
             last_week = _week_dates(-1)
             sent = skipped = 0
 
-            if specific_member:
-                targets = [(str(specific_member.id), specific_member)]
+            if specific_member and specific_member.guild:
+                guild_targets = [(specific_member.guild, [(str(specific_member.id), specific_member)])]
             else:
-                member_map: dict[str, discord.Member] = {}
-                for guild in bot.guilds:
-                    for m in guild.members:
-                        if not m.bot and str(m.id) not in member_map:
-                            member_map[str(m.id)] = m
-                targets = list(member_map.items())
+                guild_targets = [
+                    (guild, [(str(m.id), m) for m in guild.members if not m.bot])
+                    for guild in bot.guilds
+                ]
 
-            for uid, member in targets:
-                try:
-                    info = data.get(uid)
-                    if not info:
-                        skipped += 1; continue
+            for guild, targets in guild_targets:
+                with get_guild_context(guild.id):
+                    data = load_data_fn()
 
-                    if info.get(WEEKLY_OPT_OUT_KEY, False):
+                for uid, member in targets:
+                    try:
+                        info = data.get(uid)
+                        if not info:
+                            skipped += 1; continue
+
+                        if info.get(WEEKLY_OPT_OUT_KEY, False):
+                            skipped += 1
+                            log.info(f'[WeeklyReport] skip {member.display_name} in {guild.name} (opt-out)')
+                            continue
+
+                        this_total = _week_total(info, this_week)
+                        last_total = _week_total(info, last_week)
+                        if this_total == 0 and last_total == 0:
+                            skipped += 1; continue
+
+                        msg = _build_weekly_dm(
+                            info.get('name', member.display_name),
+                            info, this_week, last_week, all_badges,
+                        )
+                        if len(msg) > 1950:
+                            msg = msg[:1950] + '\n_...(rút gọn)_'
+                        with get_guild_context(guild.id):
+                            await safe_send_dm_fn(member, msg)
+                        sent += 1
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        log.error(f'[WeeklyReport] Error sending to {member.display_name}: {e}', exc_info=True)
                         skipped += 1
-                        log.info(f'[WeeklyReport] skip {member.display_name} (opt-out)')
-                        continue
-
-                    this_total = _week_total(info, this_week)
-                    last_total = _week_total(info, last_week)
-                    if this_total == 0 and last_total == 0:
-                        skipped += 1; continue
-
-                    msg = _build_weekly_dm(
-                        info.get('name', member.display_name),
-                        info, this_week, last_week, all_badges,
-                    )
-                    if len(msg) > 1950:
-                        msg = msg[:1950] + '\n_...(rút gọn)_'
-                    await safe_send_dm_fn(member, msg)
-                    sent += 1
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    log.error(f'[WeeklyReport] Error sending to {member.display_name}: {e}', exc_info=True)
-                    skipped += 1
 
             log.info(f'[WeeklyReport] Gửi: {sent} DM, bỏ qua: {skipped}')
             return sent, skipped
@@ -689,6 +706,7 @@ async def setup_weekly_report(
     update_data_fn=None,
     class_thresholds=None,
     class_names=None,
+    guild_context_fn=None,
 ):
     configure_class_config(class_thresholds, class_names)
     if bot.cogs.get('WeeklyReport'):
@@ -698,6 +716,7 @@ async def setup_weekly_report(
         update_data_fn=update_data_fn,
         class_thresholds=class_thresholds,
         class_names=class_names,
+        guild_context_fn=guild_context_fn,
     )
     await bot.add_cog(cog)
     # Ghi chú: bot.add_cog tự động đăng ký weekly_group vào bot.tree

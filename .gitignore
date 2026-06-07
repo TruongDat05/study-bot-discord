@@ -1,7 +1,12 @@
 study_data.json
+guild_config.json
 runtime_state.json
+role_config.json
 bot.log
 backups/
+data/
 .env
 __pycache__/
 *.pyc
+*.db
+*.sqlite3
