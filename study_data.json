@@ -1,0 +1,431 @@
+{
+  "864831093525577738": {
+    "name": "Hoạ ít sĩ nhiều",
+    "daily": {
+      "2026-03-18": 82,
+      "2026-03-21": 973,
+      "2026-03-24": 342,
+      "2026-03-25": 2046,
+      "2026-06-05": 1484,
+      "2026-06-06": 129
+    },
+    "total": 5056,
+    "xp": 885,
+    "level": 1,
+    "streak": 2,
+    "longest_streak": 2,
+    "last_study_date": "2026-06-06",
+    "goal": null,
+    "goal_seconds": 0,
+    "last_absent_warn": "",
+    "daily_quests": {
+      "2026-03-21": [
+        {
+          "id": "study_60",
+          "progress": 16,
+          "done": false
+        },
+        {
+          "id": "night_owl",
+          "progress": 0,
+          "done": false
+        },
+        {
+          "id": "study_30",
+          "progress": 16,
+          "done": false
+        }
+      ],
+      "2026-03-23": [
+        {
+          "id": "two_sessions",
+          "progress": 1,
+          "done": false
+        },
+        {
+          "id": "early_bird",
+          "progress": 8,
+          "done": true
+        },
+        {
+          "id": "study_180",
+          "progress": 0,
+          "done": false
+        }
+      ],
+      "2026-03-24": [
+        {
+          "id": "night_owl",
+          "progress": 22,
+          "done": true,
+          "notified": true
+        },
+        {
+          "id": "study_30",
+          "progress": 5,
+          "done": false
+        },
+        {
+          "id": "streak_3",
+          "progress": 1,
+          "done": false
+        }
+      ],
+      "2026-03-25": [
+        {
+          "id": "early_bird",
+          "progress": 0,
+          "done": false,
+          "notified": false
+        },
+        {
+          "id": "study_30",
+          "progress": 30,
+          "done": true,
+          "notified": true
+        },
+        {
+          "id": "first_in",
+          "progress": 1,
+          "done": true,
+          "notified": true
+        }
+      ],
+      "2026-03-29": [
+        {
+          "id": "early_bird",
+          "progress": 8,
+          "done": true,
+          "notified": true
+        },
+        {
+          "id": "study_180",
+          "progress": 0,
+          "done": false,
+          "notified": false
+        },
+        {
+          "id": "streak_3",
+          "progress": 2,
+          "done": false,
+          "notified": false
+        }
+      ],
+      "2026-06-05": [
+        {
+          "id": "early_bird",
+          "progress": 0,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        },
+        {
+          "id": "streak_3",
+          "progress": 1,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        },
+        {
+          "id": "streak_7",
+          "progress": 1,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        }
+      ],
+      "2026-06-06": [
+        {
+          "id": "streak_3",
+          "progress": 2,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        },
+        {
+          "id": "study_60",
+          "progress": 2,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        },
+        {
+          "id": "night_owl",
+          "progress": 0,
+          "done": false,
+          "notified": false,
+          "notification_pending": false
+        }
+      ]
+    },
+    "quests_done_total": 5,
+    "special_flags": [
+      "night_owl",
+      "early_bird"
+    ],
+    "badges": [
+      "total_1h",
+      "night_owl",
+      "early_bird"
+    ],
+    "badge_dates": {
+      "early_bird": "2026-03-23",
+      "night_owl": "2026-03-23",
+      "total_1h": "2026-06-05"
+    },
+    "xp_acc_secs": 48,
+    "pomo_history": {
+      "total_rounds": 0,
+      "total_minutes": 0,
+      "total_xp": 0,
+      "best_streak": 0,
+      "today_rounds": 0,
+      "today_date": "2026-06-06",
+      "current_streak": 0
+    },
+    "daily_earnings": {
+      "2026-06-05": 240,
+      "2026-06-06": 30
+    },
+    "balance": 270,
+    "total_earned": 270,
+    "debt": 0,
+    "net_worth": 270,
+    "class": 1,
+    "coins_acc_secs": 53,
+    "transactions": [
+      {
+        "id": "tx_20260605223230774073_7098",
+        "ts": "2026-06-05T22:32:30",
+        "type": "earning",
+        "amount": 20,
+        "balance": 20,
+        "balance_after": 20,
+        "description": "Study reward for 2m 47s",
+        "balance_before": 0,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260605223730772954_7605",
+        "ts": "2026-06-05T22:37:30",
+        "type": "earning",
+        "amount": 50,
+        "balance": 70,
+        "balance_after": 70,
+        "description": "Study reward for 4m 59s",
+        "balance_before": 20,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260605224036346045_7461",
+        "ts": "2026-06-05T22:40:36",
+        "type": "earning",
+        "amount": 30,
+        "balance": 100,
+        "balance_after": 100,
+        "description": "Study reward for 3m 5s",
+        "balance_before": 70,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260605225426199732_6326",
+        "ts": "2026-06-05T22:54:26",
+        "type": "earning",
+        "amount": 40,
+        "balance": 140,
+        "balance_after": 140,
+        "description": "Study reward for 3m 37s",
+        "balance_before": 100,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260605225926196723_5006",
+        "ts": "2026-06-05T22:59:26",
+        "type": "earning",
+        "amount": 50,
+        "balance": 190,
+        "balance_after": 190,
+        "description": "Study reward for 4m 59s",
+        "balance_before": 140,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260605230426197693_7155",
+        "ts": "2026-06-05T23:04:26",
+        "type": "earning",
+        "amount": 50,
+        "balance": 240,
+        "balance_after": 240,
+        "description": "Study reward for 5m 0s",
+        "balance_before": 190,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-05"
+        }
+      },
+      {
+        "id": "tx_20260606171210259446_9214",
+        "ts": "2026-06-06T17:12:10",
+        "type": "earning",
+        "amount": 20,
+        "balance": 260,
+        "balance_after": 260,
+        "description": "Study reward for 46s",
+        "balance_before": 240,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-06"
+        }
+      },
+      {
+        "id": "tx_20260606180051242494_3862",
+        "ts": "2026-06-06T18:00:51",
+        "type": "earning",
+        "amount": 10,
+        "balance": 270,
+        "balance_after": 270,
+        "description": "Study reward for 1m 23s",
+        "balance_before": 260,
+        "meta": {
+          "source": "study_time",
+          "day": "2026-06-06"
+        }
+      }
+    ],
+    "active_loans": [],
+    "loan_offers": [],
+    "loan_history": [],
+    "credit_score": 600,
+    "remind_hour": null,
+    "notifications_enabled": true,
+    "notified_classes": [],
+    "notified_study_milestones": [
+      "30m",
+      "1h"
+    ],
+    "notified_coin_milestones": [],
+    "notified_loan_overdue": []
+  },
+  "1209166837275824260": {
+    "name": "User 1209166837275824260",
+    "daily": {},
+    "total": 0,
+    "xp": 75,
+    "level": 0,
+    "streak": 0,
+    "longest_streak": 0,
+    "last_study_date": "",
+    "goal": null,
+    "goal_seconds": 0,
+    "last_absent_warn": "",
+    "xp_acc_secs": 0,
+    "badges": [],
+    "badge_dates": {},
+    "quests_done_total": 1,
+    "daily_quests": {
+      "2026-03-24": [
+        {
+          "id": "study_60",
+          "progress": 0,
+          "done": false,
+          "notified": false
+        },
+        {
+          "id": "two_sessions",
+          "progress": 1,
+          "done": false,
+          "notified": false
+        },
+        {
+          "id": "night_owl",
+          "progress": 22,
+          "done": true,
+          "notified": true
+        }
+      ]
+    },
+    "special_flags": [],
+    "remind_hour": null,
+    "daily_earnings": {},
+    "balance": 0,
+    "total_earned": 0,
+    "debt": 0,
+    "net_worth": 0,
+    "class": 0,
+    "coins_acc_secs": 0,
+    "transactions": [],
+    "active_loans": [],
+    "loan_offers": [],
+    "loan_history": [],
+    "credit_score": 600,
+    "notifications_enabled": true,
+    "notified_classes": [],
+    "notified_study_milestones": [],
+    "notified_coin_milestones": [],
+    "notified_loan_overdue": []
+  },
+  "478570663549075456": {
+    "name": "HoangNhoo",
+    "daily": {},
+    "daily_earnings": {},
+    "total": 0,
+    "balance": 50,
+    "total_earned": 0,
+    "debt": 0,
+    "net_worth": 50,
+    "class": 0,
+    "xp": 0,
+    "level": 0,
+    "streak": 0,
+    "longest_streak": 0,
+    "last_study_date": "",
+    "goal": null,
+    "goal_seconds": 0,
+    "last_absent_warn": "",
+    "xp_acc_secs": 0,
+    "coins_acc_secs": 0,
+    "transactions": [
+      {
+        "id": "tx_20260605225317980688_6220",
+        "ts": "2026-06-05T22:53:17",
+        "type": "admin_adjustment",
+        "amount": 50,
+        "balance": 50,
+        "balance_after": 50,
+        "description": "punish",
+        "balance_before": 0,
+        "counterparty": "864831093525577738"
+      }
+    ],
+    "active_loans": [],
+    "loan_offers": [],
+    "loan_history": [],
+    "credit_score": 600,
+    "badges": [],
+    "badge_dates": {},
+    "quests_done_total": 0,
+    "daily_quests": {},
+    "special_flags": [],
+    "remind_hour": null,
+    "notifications_enabled": true,
+    "notified_classes": [],
+    "notified_study_milestones": [],
+    "notified_coin_milestones": [],
+    "notified_loan_overdue": []
+  }
+}
