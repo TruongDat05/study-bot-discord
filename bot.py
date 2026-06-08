@@ -24,12 +24,15 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path      
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
-from pomodoro import PomodoroSession, create_pomodoro_cog
+from pomodoro import PomodoroSession
+from core.acl import ACLManager
+from core.config_manager import ConfigManager, IMPORTANT_CONFIG_DEFAULTS
+from core.plugin_manager import PluginManager
 from services.database import DatabaseService
 from services.repositories import BotRepository
-from weekly_report import setup_weekly_report
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -91,12 +94,13 @@ HUGGINGFACE_API_KEY = (
 GEMINI_FLASH_MODEL      = os.getenv('GEMINI_FLASH_MODEL', 'gemini-3.5-flash')
 GEMINI_FLASH_LITE_MODEL = os.getenv('GEMINI_FLASH_LITE_MODEL', 'gemini-3.1-flash-lite')
 GROQ_MODELS             = os.getenv('GROQ_MODELS', 'llama-3.3-70b-versatile,qwen/qwen3-32b')
-AI_PROVIDER_ORDER       = os.getenv('AI_PROVIDER_ORDER', 'gemini,groq,openrouter,huggingface')
+AI_PROVIDER_ORDER       = os.getenv('AI_PROVIDER_ORDER', 'groq,gemini,openrouter,huggingface')
 OPENROUTER_MODEL        = os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-20b:free')
 HUGGINGFACE_MODEL       = os.getenv('HUGGINGFACE_MODEL', 'deepseek-ai/DeepSeek-R1:fastest')
-AI_HTTP_TIMEOUT         = max(1.0, _env_float('AI_HTTP_TIMEOUT', 45.0))
+AI_HTTP_TIMEOUT         = max(1.0, _env_float('AI_HTTP_TIMEOUT', 60.0))
 AI_ONE_MESSAGE_LIMIT    = max(1, min(2000, _env_int('AI_ONE_MESSAGE_LIMIT', 1750) or 1750))
-AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1300) or 1300)
+AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1400) or 1400)
+AI_TEMPERATURE          = max(0.0, min(2.0, _env_float('AI_TEMPERATURE', 0.6)))
 
 WARN_BEFORE_KICK    = 10
 WAIT_SECONDS        = 60
@@ -145,7 +149,6 @@ DASHBOARD_PORT      = _env_int('DASHBOARD_PORT', 5000)
 ABSENT_DAYS_WARN    = 2
 CHECKPOINT_MINUTES  = 5
 LIVE_UPDATE_MINUTES = 5
-MILESTONE_MINUTES   = [30, 60, 120, 180, 240, 300, 360]
 RUNTIME_RESTORE_MAX_AGE_SECONDS = max(60, _env_int('RUNTIME_RESTORE_MAX_AGE_SECONDS', 1800))
 
 COINS_PER_MINUTE = max(0, _env_int('COINS_PER_MINUTE', 10))
@@ -241,66 +244,6 @@ BADGES: dict[str, dict] = {
     'xp_10000':    {'name': '10.000 coins 💎',    'desc': 'Kiếm 10.000 coins',   'condition': ('total_earned', 10000)},
 }
 
-MOTIVATIONS_BILINGUAL = [
-    ('"The secret of getting ahead is getting started." — Mark Twain',
-     '🌟 Bí quyết để tiến về phía trước là bắt đầu ngay bây giờ!'),
-    ('"It always seems impossible until it\'s done." — Nelson Mandela',
-     '💪 Mọi thứ đều có vẻ bất khả thi — cho đến khi bạn làm được!'),
-    ('"Don\'t watch the clock; do what it does. Keep going." — Sam Levenson',
-     '⏰ Đừng nhìn đồng hồ, hãy cứ tiến lên. Mỗi phút học là một bước đến thành công!'),
-    ('"Success is the sum of small efforts repeated day in and day out."',
-     '🔥 Thành công là tổng của những nỗ lực nhỏ, lặp đi lặp lại mỗi ngày!'),
-    ('"The expert in anything was once a beginner."',
-     '🌱 Chuyên gia của ngày mai là người học sinh chăm chỉ của hôm nay!'),
-    ('"Focus on your goal. Don\'t look in any direction but ahead."',
-     '🎯 Tập trung vào mục tiêu! Đừng nhìn sang ngang, chỉ nhìn về phía trước!'),
-    ('"Hard work beats talent when talent doesn\'t work hard." — Tim Notke',
-     '⚡ Chăm chỉ sẽ đánh bại tài năng khi tài năng không chịu cố gắng!'),
-    ('"Push yourself, because no one else is going to do it for you."',
-     '🚀 Hãy tự thúc đẩy bản thân — không ai làm điều đó thay bạn đâu!'),
-    ('"Great things never came from comfort zones."',
-     '💎 Những điều tuyệt vời không bao giờ đến từ vùng an toàn!'),
-    ('"Dream it. Believe it. Build it."',
-     '✨ Mơ về nó. Tin vào nó. Xây dựng nó — bắt đầu từ hôm nay!'),
-    ('"You don\'t have to be great to start, but you have to start to be great."',
-     '🌅 Bạn không cần giỏi để bắt đầu, nhưng phải bắt đầu để trở nên giỏi!'),
-    ('"Success doesn\'t come from what you do occasionally. It comes from consistency."',
-     '📅 Thành công đến từ sự kiên trì mỗi ngày, không phải từ những lúc hứng khởi!'),
-    ('"One day or day one. You decide."',
-     '🔑 "Một ngày nào đó" hay "Ngày một"? Chỉ có bạn mới quyết định được!'),
-    ('"Discipline is choosing between what you want now and what you want most."',
-     '⚖️ Kỷ luật là lựa chọn giữa điều bạn muốn ngay và điều bạn muốn nhất!'),
-    ('"Every master was once a disaster." — T. Harv Eker',
-     '🎓 Mỗi chuyên gia đều đã từng là người mới. Đừng ngại sai!'),
-    ('"Believe you can and you\'re halfway there." — Theodore Roosevelt',
-     '🌈 Tin rằng bạn làm được và bạn đã đi được nửa chặng đường rồi!'),
-    ('"Your future self will thank you for the work you put in today."',
-     '🙏 Bản thân tương lai của bạn sẽ cảm ơn những nỗ lực của ngày hôm nay!'),
-    ('"Work hard in silence. Let success be your noise."',
-     '🤫 Làm việc chăm chỉ trong im lặng. Để thành công nói thay bạn!'),
-    ('"Study now, shine later."',
-     '✨ Học chăm chỉ hôm nay — tỏa sáng rực rỡ ngày mai!'),
-    ('"Fall seven times, stand up eight." — Japanese proverb',
-     '🔄 Ngã bảy lần, đứng dậy tám lần. Đó mới là người chiến thắng!'),
-]
-
-def _random_motivation() -> str:
-    return _random_motivation_plain()
-
-def _random_motivation_plain() -> str:
-    en, vi = random.choice(MOTIVATIONS_BILINGUAL)
-    return f'{en}\n{vi}'
-
-MILESTONE_DM = {
-    30:  '⏰ Bạn đã học được **30 phút**! 💪 Tiếp tục nhé — bạn đang làm rất tốt!',
-    60:  '🌟 **1 tiếng** học tập! Xuất sắc! Uống nước và vươn vai chút nhé! 💧',
-    120: '🔥 **2 tiếng** liên tục! Phi thường! Nghỉ 5 phút rồi chiến tiếp! 🧘',
-    180: '💎 **3 tiếng**! Bạn đang ở đỉnh cao! Cơ thể cần nghỉ ngơi ngắn đấy! 🍵',
-    240: '🚀 **4 tiếng**! Chiến binh thực sự! Ăn nhẹ gì đó để nạp năng lượng nhé! 🍌',
-    300: '👑 **5 tiếng**! Vô địch! Đây là phiên học đáng nhớ! 🏆',
-    360: '⚡ **6 tiếng**! Huyền thoại! Bạn thật đáng kinh ngạc — hãy nghỉ ngơi xứng đáng! 🌙',
-}
-
 NOTIFY_GREEN = 0x2ECC71
 NOTIFY_GOLD = 0xF1C40F
 NOTIFY_RED = 0xE74C3C
@@ -308,12 +251,15 @@ NOTIFY_BLUE = 0x5865F2
 NOTIFY_PURPLE = 0x9B59B6
 
 STUDY_MILESTONE_SECONDS = [
-    (60 * 60, '1h', '1 giờ'),
-    (5 * 60 * 60, '5h', '5 giờ'),
-    (10 * 60 * 60, '10h', '10 giờ'),
-    (50 * 60 * 60, '50h', '50 giờ'),
-    (100 * 60 * 60, '100h', '100 giờ'),
-    (200 * 60 * 60, '200h', '200 giờ'),
+    3600,
+    7200,
+    18000,
+    36000,
+    72000,
+    180000,
+    360000,
+    720000,
+    1800000,
 ]
 COIN_EARNING_MILESTONES = [1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000]
 
@@ -360,7 +306,24 @@ intents = discord.Intents.default()
 intents.voice_states    = True
 intents.members         = True
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+
+def _command_prefix_resolver(client: commands.Bot, message: discord.Message):
+    if getattr(message, 'guild', None) and 'config_manager' in globals():
+        try:
+            return str(config_manager.get(message.guild.id, 'command_prefix') or '!')
+        except Exception:
+            log.warning('[Config] Failed to resolve command_prefix for %s', message.guild.id, exc_info=True)
+    return '!'
+
+bot = commands.Bot(command_prefix=_command_prefix_resolver, intents=intents)
+
+config_manager = ConfigManager(
+    database,
+    legacy_repository=repository,
+    defaults={**IMPORTANT_CONFIG_DEFAULTS, 'coins_per_minute': COINS_PER_MINUTE},
+)
+acl_manager = ACLManager(database, bot=bot, config_manager=config_manager)
+plugin_manager = PluginManager(bot, config_manager=config_manager)
 
 def _capture_guild_context(guild_id: int | None):
     if guild_id:
@@ -401,6 +364,7 @@ _role_sync_locks:     dict[int, asyncio.Lock] = {}
 _dashboard_started:   bool                    = False
 _room_panel_view_registered: bool             = False
 _startup_extensions_ready: bool               = False
+_core_cogs_ready: bool                        = False
 
 _data_lock = threading.RLock()
 _runtime_lock = threading.Lock()
@@ -424,6 +388,8 @@ def initialize_database():
     if _database_initialized:
         return
     repository.initialize()
+    config_manager.initialize()
+    acl_manager.initialize()
     _database_initialized = True
 
 
@@ -451,7 +417,28 @@ def guild_data_context(guild_id: int | None):
 
 def get_guild_config(guild_id: int) -> dict:
     initialize_database()
-    return repository.get_guild_config(int(guild_id))
+    config = repository.get_guild_config(int(guild_id))
+    for key in (
+        'create_room_channel_id',
+        'temp_room_category_id',
+        'report_channel_id',
+        'welcome_channel_id',
+        'admin_role_id',
+        'coins_per_minute',
+        'focus_channel_ids',
+        'ai_enabled_channels',
+        'notify_channel_mode',
+        'autoload_plugins',
+        'command_prefix',
+    ):
+        try:
+            value = config_manager.get(int(guild_id), key)
+        except Exception:
+            log.warning('[Config] Failed to resolve key %s for guild %s', key, guild_id, exc_info=True)
+            continue
+        if value is not None:
+            config[key] = value
+    return config
 
 
 def set_guild_config(guild_id: int, key: str, value):
@@ -1129,7 +1116,6 @@ _NOTICE_EMOJI_RE = re.compile(r'[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]')
 def _compact_notice_description(message: str) -> str:
     text = str(message or '').strip()
     text = _NOTICE_EMOJI_RE.sub('', text)
-    text = text.replace('**', '')
     text = re.sub(r'[─━]{3,}', '', text)
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r' *\n *', '\n', text)
@@ -1173,7 +1159,10 @@ async def send_voice_notice(
     )
 
     try:
-        await channel.send(embed=embed)
+        await channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
     except discord.Forbidden:
         log.info(f'Cannot send notice to voice channel chat: {getattr(channel, "id", None)}')
     except Exception as e:
@@ -1223,8 +1212,6 @@ def _notice_title_color_from_text(message: str) -> tuple[str, int]:
         return 'Nhắc nhở', NOTIFY_GOLD
     if 'chào mừng' in text or 'phòng học tạm đã được tạo' in text:
         return 'Chào mừng', NOTIFY_BLUE
-    if 'study now' in text or 'động lực' in text:
-        return 'Động lực hôm nay', NOTIFY_BLUE
     return 'Thông báo', NOTIFY_BLUE
 
 def reset_cam_notification(member_id: int):
@@ -1245,9 +1232,22 @@ def _resolve_voice_notice_channel(
     *,
     allow_current: bool = True,
 ):
-    return _focus_notice_channel(channel) or (
+    config = get_guild_config(member.guild.id)
+    mode = str(config.get('notify_channel_mode') or 'voice').lower().strip()
+    if mode in {'off', 'disabled', 'none'}:
+        return None
+    report_channel = None
+    report_channel_id = config.get('report_channel_id')
+    if report_channel_id:
+        report_channel = bot.get_channel(int(report_channel_id))
+    if mode in {'report', 'log', 'logs'}:
+        return report_channel if report_channel and hasattr(report_channel, 'send') else None
+    voice_channel = _focus_notice_channel(channel) or (
         _current_voice_notice_channel(member) if allow_current else None
     )
+    if mode in {'both', 'voice_or_report'}:
+        return voice_channel or (report_channel if report_channel and hasattr(report_channel, 'send') else None)
+    return voice_channel
 
 async def notify_cam_started(member: discord.Member, channel=None):
     if not notifications_enabled_for(member.id):
@@ -1279,41 +1279,16 @@ async def notify_class_up(member: discord.Member, channel, new_class: str):
         channel=notice_channel,
         member=member,
         title='Chúc mừng',
-        description=f'Bạn đã đạt được hạng **{new_class}**.',
-        color=NOTIFY_GOLD,
-        footer_prefix='Tiếp tục giữ phong độ nhé.',
-    )
-
-async def notify_live_session_milestones(member: discord.Member, channel=None):
-    if not notifications_enabled_for(member.id):
-        return
-    joined_at = join_times.get(member.id)
-    if joined_at is None:
-        return
-    notice_channel = _resolve_voice_notice_channel(member, channel)
-    if not notice_channel:
-        return
-
-    elapsed_minutes = max(0, int((datetime.now() - joined_at).total_seconds() // 60))
-    sent = milestone_sent.setdefault(member.id, set())
-    reached = [minute for minute in MILESTONE_MINUTES if elapsed_minutes >= minute and minute not in sent]
-    if not reached:
-        return
-
-    minute = reached[-1]
-    sent.update(reached)
-    save_runtime_state()
-    message = MILESTONE_DM.get(
-        minute,
-        f'Bạn đã học được **{minute} phút** trong phiên này. Tiếp tục giữ nhịp nhé!',
-    )
-    await send_voice_notice(
-        channel=notice_channel,
-        member=member,
-        title='Cột mốc phiên học',
-        description=message,
+        description=f'{member.mention} đã đạt được hạng **{new_class}**.',
         color=NOTIFY_GOLD,
     )
+
+def _study_milestone_key(seconds: int) -> str:
+    return f'{int(seconds) // 3600}h'
+
+def _format_study_milestone_duration(seconds: int) -> str:
+    hours = max(1, int(seconds) // 3600)
+    return f'{hours} giờ'
 
 async def notify_study_milestones(member: discord.Member, channel=None):
     if not notifications_enabled_for(member.id):
@@ -1328,7 +1303,7 @@ async def notify_study_milestones(member: discord.Member, channel=None):
         return
     total_seconds = _as_int(info.get('total', 0))
     reached = [
-        key for seconds, key, _ in STUDY_MILESTONE_SECONDS
+        _study_milestone_key(seconds) for seconds in STUDY_MILESTONE_SECONDS
         if total_seconds >= seconds
     ]
     newly_claimed = _claim_user_notifications(
@@ -1340,16 +1315,17 @@ async def notify_study_milestones(member: discord.Member, channel=None):
     if not newly_claimed:
         return
     highest_key = newly_claimed[-1]
-    label = next(
-        (label for _, key, label in STUDY_MILESTONE_SECONDS if key == highest_key),
-        highest_key,
+    milestone_seconds = next(
+        (seconds for seconds in STUDY_MILESTONE_SECONDS if _study_milestone_key(seconds) == highest_key),
+        0,
     )
+    label = _format_study_milestone_duration(milestone_seconds) if milestone_seconds else highest_key
     await send_voice_notice(
         channel=notice_channel,
         member=member,
         title='Chúc mừng',
         description=(
-            f'Bạn đã học tổng cộng **{label}** và đạt một cột mốc mới.\n'
+            f'{member.mention} đã học tổng cộng **{label}** và đạt một cột mốc mới.\n'
             'Hãy tiếp tục duy trì thói quen học tập này nhé!'
         ),
         color=NOTIFY_GOLD,
@@ -1531,7 +1507,6 @@ async def _handle_progress_notifications(member: discord.Member, result: dict | 
         return
     if result.get('level_up'):
         await notify_class_up(member, notice_channel, class_label(result['new_level']))
-    await notify_live_session_milestones(member, notice_channel)
     await notify_study_milestones(member, notice_channel)
     await notify_coin_milestones(member, notice_channel)
     await notify_overdue_loans(member, notice_channel)
@@ -2128,6 +2103,33 @@ def add_study_time(
             f'Không thể xác minh dữ liệu sau khi cộng thời gian cho {member_name} ({member_id}).'
         )
         return {}
+    guild_id = _guild_data_id()
+    if guild_id:
+        channel_id = None
+        used_camera = False
+        used_stream = False
+        guild = bot.get_guild(int(guild_id))
+        member = guild.get_member(member_id) if guild else None
+        if member and member.voice and member.voice.channel:
+            channel_id = member.voice.channel.id
+            used_camera = bool(member.voice.self_video)
+            used_stream = bool(member.voice.self_stream)
+        try:
+            repository.record_study_session_chunk(
+                guild_id=int(guild_id),
+                user_id=int(member_id),
+                channel_id=channel_id,
+                started_at=start_time.astimezone().isoformat(timespec='seconds'),
+                ended_at=end_time.astimezone().isoformat(timespec='seconds'),
+                duration_seconds=seconds,
+                active_seconds=seconds,
+                earned_coins=_as_int(result.get('coins_earned', 0)),
+                used_camera=used_camera,
+                used_stream=used_stream,
+                ended_reason='checkpoint',
+            )
+        except Exception as e:
+            log.warning('[StudySession] Could not persist study session chunk: %s', e, exc_info=True)
     _sync_checkpoint_after_persist(member_id, end_time)
     return result
 
@@ -3670,12 +3672,6 @@ async def _remind_loop(member: discord.Member, hour: int):
                     ),
                     color=NOTIFY_GOLD,
                 )
-                await send_private_notify_embed(
-                    member=member,
-                    title='Động lực hôm nay',
-                    description=_random_motivation_plain(),
-                    color=NOTIFY_BLUE,
-                )
             else:
                 await send_private_notify_embed(
                     member=member,
@@ -4368,13 +4364,14 @@ async def _sync_member_progress(member: discord.Member, previous_level: int | No
 # ─── AI ──────────────────────────────────────────────────────────────────────
 
 AI_SYSTEM_PROMPT = (
-    'Bạn là trợ lý học tập trong Discord. '
-    'Trả lời thông minh, súc tích nhưng không hời hợt; giải thích đủ để người học hiểu và áp dụng. '
-    'Không viết lan man, không mở bài dài, không lặp lại câu hỏi, không hiển thị quá trình suy luận nội bộ. '
-    'Nếu câu hỏi đơn giản, trả lời trong 2-4 câu. '
-    'Nếu câu hỏi cần giải thích, dùng tối đa 3-6 bullet points hoặc đoạn ngắn, nêu điều kiện/ngoại lệ quan trọng nếu có. '
-    'Với câu hỏi học tập, ưu tiên cấu trúc: định nghĩa → ý chính → cách áp dụng → ví dụ/công thức ngắn nếu cần → kết luận. '
-    f'Câu trả lời phải nằm trong một tin nhắn Discord, khoảng dưới {AI_ONE_MESSAGE_LIMIT} ký tự.'
+    'Bạn là một trợ lý AI đa năng trong Discord. '
+    'Bạn có thể trả lời mọi chủ đề bình thường như học tập, lập trình, toán, ngôn ngữ, đời sống, giải thích khái niệm, tóm tắt, viết lại nội dung, gợi ý ý tưởng và hội thoại thường ngày. '
+    'Trả lời tự nhiên, hữu ích, rõ ràng và đủ ý. '
+    'Không giới hạn bản thân chỉ trong chủ đề học tập. '
+    'Nếu câu hỏi đơn giản, trả lời trực tiếp và ngắn gọn. '
+    'Nếu câu hỏi phức tạp, hãy giải thích có cấu trúc, nêu ý chính, ví dụ ngắn nếu cần, rồi kết luận. '
+    'Không mở bài dài, không lặp lại câu hỏi, không trả lời sơ sài. '
+    'Luôn cố gắng giữ câu trả lời trong một tin nhắn Discord.'
 )
 AI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 AI_RETRYABLE_ERROR_PATTERNS = (
@@ -4396,7 +4393,7 @@ AI_AUTH_ERROR_PATTERNS = (
     'invalid authentication',
     'unauthenticated',
 )
-DEFAULT_AI_PROVIDER_ORDER = ('gemini', 'groq', 'openrouter', 'huggingface')
+DEFAULT_AI_PROVIDER_ORDER = ('groq', 'gemini', 'openrouter', 'huggingface')
 AI_PROVIDER_ALIASES = {
     'groq': 'groq',
     'gemini': 'gemini',
@@ -4452,16 +4449,15 @@ def smart_cut_at_sentence(text: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
     suffix = '\n\n_(rút gọn)_'
     safe_limit = max(1, limit - len(suffix))
     cut = text[:safe_limit]
-    last_sentence = max(
-        cut.rfind('. '),
-        cut.rfind('! '),
-        cut.rfind('? '),
-        cut.rfind('。'),
-        cut.rfind('\n'),
-    )
-    if last_sentence > safe_limit * 0.6:
-        return cut[:last_sentence + 1].strip() + suffix
-    return cut.rstrip(' ,;:-') + '...' + suffix
+    sentence_ends = [
+        match.end()
+        for match in re.finditer(r'[.!?。！？](?=\s|$)', cut)
+    ]
+    if sentence_ends:
+        return cut[:sentence_ends[-1]].strip() + suffix
+
+    fallback = 'Câu trả lời quá dài nên bot chưa thể rút gọn an toàn trong một tin nhắn Discord.'
+    return fallback[:limit].strip()
 
 
 def _openai_compatible_token_limit(provider: dict) -> dict:
@@ -4632,7 +4628,7 @@ async def _call_gemini_provider(client: httpx.AsyncClient, provider: dict, quest
         ],
         'generationConfig': {
             'maxOutputTokens': AI_MAX_OUTPUT_TOKENS,
-            'temperature': 0.5,
+            'temperature': AI_TEMPERATURE,
         },
     }
     headers = {
@@ -4655,6 +4651,7 @@ async def _call_openai_compatible_provider(client: httpx.AsyncClient, provider: 
             {'role': 'system', 'content': AI_SYSTEM_PROMPT},
             {'role': 'user', 'content': question},
         ],
+        'temperature': AI_TEMPERATURE,
     }
     payload.update(_openai_compatible_token_limit(provider))
     url = f"{provider['base_url'].rstrip('/')}/chat/completions"
@@ -4672,6 +4669,7 @@ async def _call_huggingface_text_generation_provider(client: httpx.AsyncClient, 
         'inputs': prompt,
         'parameters': {
             'max_new_tokens': AI_MAX_OUTPUT_TOKENS,
+            'temperature': AI_TEMPERATURE,
             'return_full_text': False,
         },
     }
@@ -4723,9 +4721,9 @@ async def _ask_ai_raw(question: str) -> str:
 async def _compact_ai_answer(question: str, answer: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
     compact_prompt = (
         f'Rút gọn câu trả lời sau xuống tối đa {limit} ký tự. '
-        'Vẫn phải đủ ý chính, rõ ràng, dễ hiểu. '
+        'Vẫn phải đủ ý chính, rõ ràng, dễ hiểu và nằm trong một tin nhắn Discord. '
         'Không thêm mở bài. Không nói rằng bạn đang rút gọn. '
-        'Dùng tối đa 3-5 bullet points nếu cần.\n\n'
+        'Không lặp lại câu hỏi. Dùng tối đa 3-5 bullet points nếu cần.\n\n'
         f'Câu hỏi: {question}\n\n'
         f'Câu trả lời cần rút gọn:\n{answer}'
     )
@@ -4812,6 +4810,18 @@ async def slash_rank(interaction: discord.Interaction, member: discord.Member = 
     await interaction.followup.send(
         _build_rank_message(target, _get_live_enriched_data(interaction.guild)),
         ephemeral=is_self
+    )
+
+
+@bot.tree.command(name='profile', description='Xem profile học tập của bạn')
+@app_commands.describe(member='Thành viên (để trống = bản thân)')
+async def slash_profile(interaction: discord.Interaction, member: discord.Member = None):
+    is_self = member is None
+    await interaction.response.defer(ephemeral=is_self)
+    target = member or interaction.user
+    await interaction.followup.send(
+        _build_rank_message(target, _get_live_enriched_data(interaction.guild)),
+        ephemeral=is_self,
     )
 
 # ── /quest ─────────────────────────────────────────────────────────────────
@@ -4903,6 +4913,37 @@ async def slash_badges(interaction: discord.Interaction, member: discord.Member 
         lines.append('  '.join(cat_parts))
     await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
+
+@bot.tree.command(name='achievements', description='Xem achievements/huy hiệu học tập')
+@app_commands.describe(member='Thành viên (để trống = bản thân)')
+async def slash_achievements(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    target = member or interaction.user
+    uid = str(target.id)
+    if target.id == interaction.user.id:
+        raw = load_data()
+        if uid not in raw:
+            def ensure_user(data: dict):
+                data.setdefault(uid, _default_user(interaction.user.display_name))
+
+            update_data(ensure_user)
+    data = _get_live_enriched_data(interaction.guild)
+    if uid not in data:
+        await interaction.followup.send(f'**{target.display_name}** chưa có achievements.', ephemeral=True)
+        return
+    earned = set(data[uid].get('badges', []))
+    unlocked = [BADGES[key] for key in earned if key in BADGES]
+    locked_count = max(0, len(BADGES) - len(earned))
+    lines = [f'🏅 **Achievements của {target.display_name}** ({len(earned)}/{len(BADGES)})']
+    if unlocked:
+        for badge in unlocked[:20]:
+            lines.append(f'✅ **{badge.get("name", "?")}** · {badge.get("desc", "")}')
+    else:
+        lines.append('📭 Chưa unlock achievement nào.')
+    if locked_count:
+        lines.append(f'\n🔒 Còn `{locked_count}` achievement chưa unlock.')
+    await interaction.followup.send('\n'.join(lines)[:1900], ephemeral=True)
+
 # ── /card ──────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='card', description='Tạo ảnh profile card để chia sẻ')
@@ -4932,8 +4973,17 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
 # ── /stats ─────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name='stats', description='Xem thống kê học tập chi tiết')
-@app_commands.describe(member='Thành viên (để trống = bản thân)')
-async def slash_stats(interaction: discord.Interaction, member: discord.Member = None):
+@app_commands.describe(member='Thành viên (để trống = bản thân)', period='Khoảng thống kê')
+@app_commands.choices(period=[
+    app_commands.Choice(name='today', value='today'),
+    app_commands.Choice(name='week', value='week'),
+    app_commands.Choice(name='month', value='month'),
+])
+async def slash_stats(
+    interaction: discord.Interaction,
+    member: discord.Member = None,
+    period: str = 'today',
+):
     await interaction.response.defer(ephemeral=True)
     target = member or interaction.user
     uid    = str(target.id)
@@ -4950,7 +5000,8 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
             f'❌ **{target.display_name}** chưa có dữ liệu!', ephemeral=True
         ); return
     info        = data[uid]
-    today       = datetime.now().strftime('%Y-%m-%d')
+    now_dt      = datetime.now()
+    today       = now_dt.strftime('%Y-%m-%d')
     today_saved = info.get('daily', {}).get(today, 0)
     today_saved += _get_unsaved_study_seconds(target.id)
     balance    = info.get('balance', 0)
@@ -4966,10 +5017,29 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
     goal       = info.get('goal')
     goal_secs  = info.get('goal_seconds', 0)
     remind_h   = info.get('remind_hour')
+    daily       = info.get('daily', {})
+    earnings    = info.get('daily_earnings', {})
+    if period == 'week':
+        period_days = [(now_dt - timedelta(days=offset)).strftime('%Y-%m-%d') for offset in range(7)]
+        period_label = '7 ngày'
+        period_secs = sum(_as_int(daily.get(day, 0)) for day in period_days) + _get_unsaved_study_seconds(target.id)
+        period_earned = sum(_as_int(earnings.get(day, 0)) for day in period_days)
+    elif period == 'month':
+        month_prefix = now_dt.strftime('%Y-%m-')
+        period_label = 'tháng này'
+        period_secs = sum(_as_int(value) for day, value in daily.items() if str(day).startswith(month_prefix))
+        period_secs += _get_unsaved_study_seconds(target.id)
+        period_earned = sum(_as_int(value) for day, value in earnings.items() if str(day).startswith(month_prefix))
+    else:
+        period = 'today'
+        period_label = 'hôm nay'
+        period_secs = today_saved
+        period_earned = today_earned
     msg = (
         f'📊 **Thống kê của {target.display_name}**\n'
         f'🏛️ `{class_label(class_idx)}` | Total earned `{format_coins(total_earned)}` _(còn {format_coins(coins_need)})_\n'
         f'💵 Balance: `{format_coins(balance)}` | Debt: `{format_coins(debt)}` | Net worth: `{format_coins(balance - debt)}`\n'
+        f'📌 Khoảng `{period_label}`: `{format_time(period_secs)}` · earned `{format_coins(period_earned)}`\n'
         f'🪙 Earned hôm nay: `{format_coins(today_earned)}`\n'
         f'🔥 Streak: `{streak} ngày` _(kỷ lục: {info.get("longest_streak",0)})_\n'
         f'🕐 Hôm nay: `{format_time(today_saved)}`\n'
@@ -4985,16 +5055,73 @@ async def slash_stats(interaction: discord.Interaction, member: discord.Member =
     msg += f'\n_Dùng `/card` để tạo ảnh profile!_'
     await interaction.followup.send(msg, ephemeral=True)
 
+
+@bot.tree.command(name='streak', description='Xem streak học tập')
+@app_commands.describe(member='Thành viên (để trống = bản thân)')
+async def slash_streak(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    is_self = member is None
+    await interaction.response.defer(ephemeral=is_self)
+    data = _get_live_enriched_data(interaction.guild)
+    info = data.get(str(target.id))
+    if not info:
+        await interaction.followup.send(f'**{target.display_name}** chưa có dữ liệu streak.', ephemeral=is_self)
+        return
+    await interaction.followup.send(
+        (
+            f'🔥 **Streak của {target.display_name}**\n'
+            f'Hiện tại: `{_as_int(info.get("streak", 0))}` ngày\n'
+            f'Kỷ lục: `{_as_int(info.get("longest_streak", 0))}` ngày\n'
+            f'Lần học gần nhất: `{info.get("last_study_date") or "chưa có"}`'
+        ),
+        ephemeral=is_self,
+    )
+
 # ── /leaderboard ───────────────────────────────────────────────────────────
 
-@bot.tree.command(name='leaderboard', description='Bảng xếp hạng học hôm nay')
-async def slash_leaderboard(interaction: discord.Interaction):
+@bot.tree.command(name='leaderboard', description='Bảng xếp hạng học tập')
+@app_commands.describe(metric='Loại leaderboard')
+@app_commands.choices(metric=[
+    app_commands.Choice(name='study_time', value='study_time'),
+    app_commands.Choice(name='coins', value='coins'),
+    app_commands.Choice(name='streak', value='streak'),
+    app_commands.Choice(name='tasks', value='tasks'),
+])
+async def slash_leaderboard(interaction: discord.Interaction, metric: str = 'study_time'):
     await interaction.response.defer()
+    if metric != 'study_time':
+        data = _get_live_enriched_data(interaction.guild)
+        lines = [f'🏆 **Leaderboard — {metric}**\n']
+        if metric == 'coins':
+            rows = sorted(data.values(), key=lambda info: _as_int(info.get('total_earned', 0)), reverse=True)
+            rows = [row for row in rows if _as_int(row.get('total_earned', 0)) > 0][:10]
+            for index, info in enumerate(rows, 1):
+                lines.append(f'`{index}.` **{info.get("name", "Unknown")}** · `{format_coins(info.get("total_earned", 0))}` earned')
+        elif metric == 'streak':
+            rows = sorted(data.values(), key=lambda info: _as_int(info.get('streak', 0)), reverse=True)
+            rows = [row for row in rows if _as_int(row.get('streak', 0)) > 0][:10]
+            for index, info in enumerate(rows, 1):
+                lines.append(f'`{index}.` **{info.get("name", "Unknown")}** · `{_as_int(info.get("streak", 0))}` ngày')
+        elif metric == 'tasks':
+            rows = repository.completed_task_leaderboard(interaction.guild_id, limit=10) if interaction.guild_id else []
+            for index, row in enumerate(rows, 1):
+                lines.append(f'`{index}.` **{row.get("display_name", "Unknown")}** · `{_as_int(row.get("completed_tasks", 0))}` tasks')
+        if len(lines) == 1:
+            lines.append('📭 Chưa có dữ liệu.')
+        await interaction.followup.send('\n'.join(lines))
+        return
     if not PIL_AVAILABLE:
-        await interaction.followup.send(
-            '❌ Tính năng leaderboard ảnh cần **Pillow**: `pip install Pillow`',
-            ephemeral=True,
+        data = _get_live_enriched_data(interaction.guild)
+        top10 = sorted(data.values(), key=lambda info: _as_int(info.get('total', 0)), reverse=True)[:10]
+        lines = ['🏆 **Leaderboard — study_time**\n']
+        lines.extend(
+            f'`{index}.` **{info.get("name", "Unknown")}** · `{format_time(info.get("total", 0))}`'
+            for index, info in enumerate(top10, 1)
+            if _as_int(info.get('total', 0)) > 0
         )
+        if len(lines) == 1:
+            lines.append('📭 Chưa có dữ liệu.')
+        await interaction.followup.send('\n'.join(lines))
         return
     entries, today = _build_study_leaderboard_entries(interaction.guild)
     view = StudyLeaderboardView(interaction.user.id, entries, today)
@@ -5187,15 +5314,14 @@ async def economy_leaderboard(interaction: discord.Interaction):
     await interaction.followup.send('\n'.join(lines))
 
 
-@economy_group.command(name='adjust', description='[Admin] Điều chỉnh balance và ghi transaction')
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(member='Thành viên cần điều chỉnh', amount='Số coins (+/-)', reason='Lý do điều chỉnh')
 async def economy_adjust(
     interaction: discord.Interaction,
     member: discord.Member,
     amount: int,
     reason: str = 'Admin adjustment',
 ):
+    if not await _require_admin(interaction, 'economy.adjust'):
+        return
     await interaction.response.defer(ephemeral=True)
     if amount == 0:
         await interaction.followup.send('❌ Amount phải khác 0.', ephemeral=True)
@@ -5619,6 +5745,7 @@ async def notify_status(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+economy_group.remove_command('adjust')
 bot.tree.add_command(economy_group)
 bot.tree.add_command(loan_group)
 bot.tree.add_command(notify_group)
@@ -5719,19 +5846,10 @@ async def slash_remind(interaction: discord.Interaction, hour: app_commands.Rang
 
     await interaction.followup.send(
         f'⏰ Đã đặt nhắc học lúc **{hour:02d}:00** mỗi ngày!\n'
-        f'Bot sẽ DM bạn nhắc nhở và động lực. 💪\n'
+        f'Bot sẽ DM bạn nhắc học đúng giờ.\n'
         f'_Tắt: `/remind -1`_',
         ephemeral=True
     )
-
-# ── /ask ───────────────────────────────────────────────────────────────────
-
-@bot.tree.command(name='ask', description='Hỏi AI học tập')
-@app_commands.describe(question='Câu hỏi của bạn')
-async def slash_ask(interaction: discord.Interaction, question: str):
-    await interaction.response.defer(thinking=True)
-    answer = await _ask_ai(question)
-    await interaction.followup.send(answer)
 
 # ── /room_panel ────────────────────────────────────────────────────────────
 
@@ -5767,6 +5885,13 @@ async def _send_room_control_error(interaction: discord.Interaction, message: st
         await interaction.response.send_message(message, ephemeral=True)
 
 
+async def _require_room_acl(interaction: discord.Interaction, action_name: str) -> bool:
+    if await acl_check(interaction, action_name):
+        return True
+    await _send_room_control_error(interaction, '❌ ACL đang chặn thao tác phòng này.')
+    return False
+
+
 class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
     room_name = discord.ui.TextInput(
         label='Tên phòng mới',
@@ -5780,6 +5905,8 @@ class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể đổi tên phòng.')
+            return
+        if not await _require_room_acl(interaction, 'room.rename'):
             return
 
         new_name = ' '.join(str(self.room_name.value).split()).strip()
@@ -6139,6 +6266,8 @@ class RoomControlView(discord.ui.View):
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể khóa phòng.')
             return
+        if not await _require_room_acl(interaction, 'room.lock'):
+            return
         await interaction.response.defer(ephemeral=True)
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.connect = False
@@ -6160,6 +6289,8 @@ class RoomControlView(discord.ui.View):
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể mở phòng.')
+            return
+        if not await _require_room_acl(interaction, 'room.unlock'):
             return
         await interaction.response.defer(ephemeral=True)
         overwrite = channel.overwrites_for(interaction.guild.default_role)
@@ -6183,6 +6314,8 @@ class RoomControlView(discord.ui.View):
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể đổi tên phòng.')
             return
+        if not await _require_room_acl(interaction, 'room.rename'):
+            return
         await interaction.response.send_modal(RoomRenameModal())
 
     @discord.ui.button(label='Xóa', emoji='🗑️', style=discord.ButtonStyle.danger, row=0, custom_id='room_delete')
@@ -6190,6 +6323,8 @@ class RoomControlView(discord.ui.View):
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể xóa phòng.')
+            return
+        if not await _require_room_acl(interaction, 'room.delete'):
             return
         room_name = channel.name
         await interaction.response.defer(ephemeral=True)
@@ -6259,6 +6394,9 @@ class RoomPanelView(discord.ui.View):
 
 @bot.tree.command(name='room_panel', description='Tạo bảng điều khiển phòng học')
 async def slash_room_panel(interaction: discord.Interaction):
+    if not await acl_check(interaction, 'room.panel'):
+        await _send_interaction_denial(interaction, 'ACL đang chặn bạn dùng bảng điều khiển phòng.')
+        return
     embed = discord.Embed(
         title='Chào mừng đến với phòng học',
         description=(
@@ -6335,7 +6473,7 @@ async def slash_help(interaction: discord.Interaction):
         '`/setgoal <mô tả> [hours] [minutes]` — Đặt mục tiêu\n\n'
         '**⏰ Tiện ích**\n'
         '`/remind <hour>` — Nhắc học hàng ngày (0-23, -1 để tắt)\n'
-        '`/ask <câu hỏi>` — Hỏi AI học tập\n'
+        '`/ask <câu hỏi>` — Hỏi AI đa năng\n'
         '`/roles` — Xem vai trò theo money class\n\n'
         '**🍅 Pomodoro**\n'
         '`/pomodoro start` — Bắt đầu phiên cá nhân\n'
@@ -6354,14 +6492,157 @@ async def slash_help(interaction: discord.Interaction):
         '`/weekly leaderboard` — Top học nhiều nhất tuần này\n'
         '`/weekly compare` — So sánh tuần này vs tuần trước\n\n'
         '**⚙️ Admin**\n'
-        '`/admin setup` · `/admin setup_status` · `/admin setup_roles` · `/admin db_status` · `/admin migrate_json_to_db` · `/admin backup_db`\n'
-        '`/syncroles` · `/report` · `/dailyboard` · `/updatelive` · `/backup` · `/economy adjust`\n'
+        '`/admin setup` · `/admin setup_status` · `/admin setup_welcome` · `/admin welcome_status` · `/admin setup_roles` · `/admin db_status` · `/admin backup` · `/admin reset_all_data`\n'
+        '`/admin coins add|remove|set` · `/admin transactions`\n'
     )
     await interaction.followup.send(msg, ephemeral=True)
 
 # ── Admin commands ─────────────────────────────────────────────────────────
 
-admin_group = app_commands.Group(name='admin', description='Quản trị bot')
+admin_group = app_commands.Group(
+    name='admin',
+    description='Quản trị bot',
+    default_permissions=discord.Permissions(administrator=True),
+)
+admin_coins_group = app_commands.Group(
+    name='coins',
+    description='Quản trị coins',
+    default_permissions=discord.Permissions(administrator=True),
+)
+
+
+async def _admin_update_coins(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    *,
+    mode: str,
+    amount: int,
+    reason: str,
+):
+    if not await _require_admin(interaction, f'admin.coins.{mode}'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    if member.bot:
+        await interaction.followup.send('Không thể chỉnh coins cho bot.', ephemeral=True)
+        return
+    amount = _as_int(amount)
+    if amount < 0:
+        await interaction.followup.send('Amount không được âm.', ephemeral=True)
+        return
+
+    uid = str(member.id)
+
+    def mutator(data: dict):
+        account = _ensure_account(data, uid, member.display_name)
+        old_balance = _as_int(account.get('balance', 0))
+        if mode == 'add':
+            delta = amount
+            new_balance = old_balance + amount
+        elif mode == 'remove':
+            delta = -amount
+            new_balance = old_balance - amount
+        elif mode == 'set':
+            delta = amount - old_balance
+            new_balance = amount
+        else:
+            return {'ok': False, 'error': 'Mode không hợp lệ.'}
+        if new_balance < 0:
+            return {
+                'ok': False,
+                'error': f'Balance không thể âm. Hiện có {format_coins(old_balance)}.',
+            }
+        account['balance'] = new_balance
+        _sync_money_class(account)
+        _append_transaction(
+            account,
+            f'admin_coins_{mode}',
+            delta,
+            reason[:120],
+            counterparty=str(interaction.user.id),
+            meta={'admin_id': interaction.user.id, 'mode': mode},
+        )
+        return {'ok': True, 'old_balance': old_balance, 'new_balance': new_balance, 'delta': delta}
+
+    result, _ = update_data(mutator)
+    if not result.get('ok'):
+        await interaction.followup.send(f'Không thể cập nhật: {result.get("error", "unknown error")}', ephemeral=True)
+        return
+    await interaction.followup.send(
+        (
+            f'Đã `{mode}` coins cho **{member.display_name}**.\n'
+            f'Delta: `{format_coins(result["delta"])}`\n'
+            f'Balance: `{format_coins(result["old_balance"])}` -> `{format_coins(result["new_balance"])}`'
+        ),
+        ephemeral=True,
+    )
+
+
+@admin_coins_group.command(name='add', description='[Admin] Cộng coins cho thành viên')
+@app_commands.describe(member='Thành viên', amount='Số coins cần cộng', reason='Lý do')
+async def admin_coins_add(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    amount: app_commands.Range[int, 1, 1_000_000_000],
+    reason: str = 'Admin coins add',
+):
+    await _admin_update_coins(interaction, member, mode='add', amount=int(amount), reason=reason)
+
+
+@admin_coins_group.command(name='remove', description='[Admin] Trừ coins của thành viên')
+@app_commands.describe(member='Thành viên', amount='Số coins cần trừ', reason='Lý do')
+async def admin_coins_remove(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    amount: app_commands.Range[int, 1, 1_000_000_000],
+    reason: str = 'Admin coins remove',
+):
+    await _admin_update_coins(interaction, member, mode='remove', amount=int(amount), reason=reason)
+
+
+@admin_coins_group.command(name='set', description='[Admin] Set balance coins của thành viên')
+@app_commands.describe(member='Thành viên', amount='Balance mới', reason='Lý do')
+async def admin_coins_set(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    amount: app_commands.Range[int, 0, 1_000_000_000],
+    reason: str = 'Admin coins set',
+):
+    await _admin_update_coins(interaction, member, mode='set', amount=int(amount), reason=reason)
+
+
+@admin_group.command(name='transactions', description='[Admin] Xem transaction gần đây')
+@app_commands.describe(member='Lọc theo thành viên', limit='Số dòng muốn xem')
+async def admin_transactions(
+    interaction: discord.Interaction,
+    member: discord.Member | None = None,
+    limit: app_commands.Range[int, 1, 25] = 10,
+):
+    if not await _require_admin(interaction, 'admin.transactions'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    data = load_data()
+    rows = []
+    if member:
+        info = data.get(str(member.id), {})
+        for tx in info.get('transactions', []) or []:
+            item = deepcopy(tx)
+            item['user_name'] = info.get('name', member.display_name)
+            rows.append(item)
+    else:
+        for info in data.values():
+            for tx in info.get('transactions', []) or []:
+                item = deepcopy(tx)
+                item['user_name'] = info.get('name', 'Unknown')
+                rows.append(item)
+    rows.sort(key=lambda tx: str(tx.get('ts', '')), reverse=True)
+    rows = rows[:int(limit)]
+    if not rows:
+        await interaction.followup.send('Chưa có transaction nào.', ephemeral=True)
+        return
+    lines = ['**Transactions gần đây**']
+    for tx in rows:
+        lines.append(f'**{tx.get("user_name", "Unknown")}** · {_tx_line(tx)}')
+    await interaction.followup.send('\n'.join(lines)[:1900], ephemeral=True)
 
 
 def _parse_channel_id_list(raw: str | None) -> list[int]:
@@ -6389,26 +6670,89 @@ def _format_config_role(guild: discord.Guild, role_id: int | None) -> str:
     return role.mention if role else f'`{role_id}` (không tìm thấy)'
 
 
-def _admin_role_allowed(interaction: discord.Interaction) -> bool:
-    member = interaction.user
+def is_bot_admin(member: discord.Member) -> bool:
     if not isinstance(member, discord.Member):
         return False
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+    if member.guild_permissions.administrator:
         return True
-    config = get_guild_config(interaction.guild_id) if interaction.guild_id else {}
+
+    config = get_guild_config(member.guild.id)
     admin_role_id = config.get('admin_role_id')
-    return bool(admin_role_id and any(role.id == admin_role_id for role in member.roles))
+    if admin_role_id:
+        return any(role.id == int(admin_role_id) for role in member.roles)
+
+    return False
 
 
-async def _require_admin(interaction: discord.Interaction) -> bool:
-    if _admin_role_allowed(interaction):
+def _admin_role_allowed(interaction: discord.Interaction) -> bool:
+    return isinstance(interaction.user, discord.Member) and is_bot_admin(interaction.user)
+
+
+async def acl_check(interaction_or_message, action_name: str) -> bool:
+    """Shared ACL helper used by bot.py commands and plugin cogs."""
+    return await acl_manager.check(interaction_or_message, action_name)
+
+
+async def _is_admin_actor(interaction_or_message) -> bool:
+    user = getattr(interaction_or_message, 'user', None) or getattr(interaction_or_message, 'author', None)
+    if await acl_manager.is_owner(user):
         return True
-    message = 'Bạn cần quyền Administrator/Manage Server hoặc role admin đã setup để dùng lệnh này.'
+    return isinstance(user, discord.Member) and is_bot_admin(user)
+
+
+async def _send_interaction_denial(interaction: discord.Interaction, message: str):
     if interaction.response.is_done():
         await interaction.followup.send(message, ephemeral=True)
     else:
         await interaction.response.send_message(message, ephemeral=True)
+
+
+async def _require_admin(interaction: discord.Interaction, action_name: str = 'admin') -> bool:
+    if not interaction.guild:
+        await _send_interaction_denial(interaction, 'Lệnh này chỉ dùng được trong server.')
+        return False
+    if await acl_manager.is_owner(interaction.user) or (
+        isinstance(interaction.user, discord.Member) and is_bot_admin(interaction.user)
+    ):
+        return True
+    await _send_interaction_denial(interaction, 'Bạn không có quyền dùng lệnh này.')
     return False
+
+
+async def _require_moderator(interaction: discord.Interaction, action_name: str = 'moderation') -> bool:
+    if not interaction.guild:
+        await _send_interaction_denial(interaction, 'Lệnh này chỉ dùng được trong server.')
+        return False
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    perms = getattr(member, 'guild_permissions', None)
+    allowed = (
+        await acl_manager.is_owner(interaction.user)
+        or bool(member and is_bot_admin(member))
+        or bool(perms and (perms.moderate_members or perms.manage_messages))
+    )
+    if not allowed:
+        await _send_interaction_denial(interaction, 'Bạn không có quyền dùng lệnh này.')
+        return False
+    return True
+
+
+def _clear_runtime_tracking_for_guild(guild_id: int) -> int:
+    """Clear in-memory study runtime state for one guild after data reset."""
+    member_ids = _runtime_member_ids_for_guild(int(guild_id))
+    for mid in member_ids:
+        cancel_task(mid)
+        join_times.pop(mid, None)
+        last_checkpoint.pop(mid, None)
+        milestone_sent.pop(mid, None)
+        runtime_member_guild_ids.pop(mid, None)
+        media_active_members.discard(mid)
+        cam_thanks_sent.discard(mid)
+        session_counts.pop(mid, None)
+    for day, mid in list(daily_first_join.items()):
+        if mid in member_ids:
+            daily_first_join.pop(day, None)
+    save_runtime_state()
+    return len(member_ids)
 
 
 def _guild_setup_status_lines(guild: discord.Guild, config: dict) -> list[str]:
@@ -6473,7 +6817,7 @@ async def admin_setup(
     coins_per_minute: int = None,
     focus_channels: str = None,
 ):
-    if not await _require_admin(interaction):
+    if not await _require_admin(interaction, 'admin.setup'):
         return
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -6512,7 +6856,7 @@ async def admin_setup(
 
 @admin_group.command(name='setup_status', description='Xem cấu hình server hiện tại')
 async def admin_setup_status(interaction: discord.Interaction):
-    if not await _require_admin(interaction):
+    if not await _require_admin(interaction, 'admin.setup_status'):
         return
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -6523,9 +6867,44 @@ async def admin_setup_status(interaction: discord.Interaction):
     await interaction.followup.send('\n'.join(_guild_setup_status_lines(guild, config)), ephemeral=True)
 
 
+@admin_group.command(name='setup_welcome', description='Thiết lập kênh chào mừng thành viên mới')
+@app_commands.describe(channel='Text channel nhận welcome message')
+async def admin_setup_welcome(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not await _require_admin(interaction, 'admin.setup_welcome'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    if channel.guild.id != guild.id:
+        await interaction.followup.send('Welcome channel phải thuộc server hiện tại.', ephemeral=True)
+        return
+
+    config_manager.set(guild.id, 'welcome_channel_id', channel.id, updated_by=interaction.user.id)
+    await interaction.followup.send(f'Đã set welcome channel: {channel.mention}', ephemeral=True)
+
+
+@admin_group.command(name='welcome_status', description='Xem kênh chào mừng hiện tại')
+async def admin_welcome_status(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.welcome_status'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+
+    channel_id = config_manager.get(guild.id, 'welcome_channel_id')
+    await interaction.followup.send(
+        f'Welcome channel: {_format_config_channel(guild, _as_int(channel_id) or None)}',
+        ephemeral=True,
+    )
+
+
 @admin_group.command(name='setup_roles', description='Tạo và đồng bộ class roles')
 async def admin_setup_roles(interaction: discord.Interaction):
-    if not await _require_admin(interaction):
+    if not await _require_admin(interaction, 'admin.setup_roles'):
         return
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -6571,7 +6950,7 @@ async def admin_setup_roles(interaction: discord.Interaction):
 
 @admin_group.command(name='db_status', description='Xem trạng thái database')
 async def admin_db_status(interaction: discord.Interaction):
-    if not await _require_admin(interaction):
+    if not await _require_admin(interaction, 'admin.db_status'):
         return
     await interaction.response.defer(ephemeral=True)
     try:
@@ -6591,9 +6970,8 @@ async def admin_db_status(interaction: discord.Interaction):
     await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
 
-@admin_group.command(name='migrate_json_to_db', description='Backup JSON cũ và migrate vào database')
 async def admin_migrate_json_to_db(interaction: discord.Interaction):
-    if not await _require_admin(interaction):
+    if not await _require_admin(interaction, 'admin.migrate_json_to_db'):
         return
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -6625,9 +7003,9 @@ async def admin_migrate_json_to_db(interaction: discord.Interaction):
     )
 
 
-@admin_group.command(name='backup_db', description='Backup SQLite database ngay lập tức')
-async def admin_backup_db(interaction: discord.Interaction):
-    if not await _require_admin(interaction):
+@admin_group.command(name='backup', description='Backup SQLite database ngay lập tức')
+async def admin_backup(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.backup'):
         return
     await interaction.response.defer(ephemeral=True)
     try:
@@ -6638,12 +7016,58 @@ async def admin_backup_db(interaction: discord.Interaction):
     await interaction.followup.send(f'Đã backup DB: `{dest}`', ephemeral=True)
 
 
+@admin_group.command(name='reset_all_data', description='Reset toàn bộ study/economy data của server hiện tại')
+@app_commands.describe(confirm='Gõ chính xác: RESET <guild_id>')
+async def admin_reset_all_data(interaction: discord.Interaction, confirm: str):
+    if not await _require_admin(interaction, 'admin.reset_all_data'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+
+    expected = f'RESET {guild.id}'
+    if str(confirm or '').strip() != expected:
+        await interaction.followup.send(
+            f'Không reset. Để xác nhận, chạy lại với confirm chính xác: `{expected}`',
+            ephemeral=True,
+        )
+        return
+
+    try:
+        backup_path = repository.backup_db(BACKUP_DIR)
+    except Exception as e:
+        log.error('[Admin] reset_all_data blocked because DB backup failed for %s: %s', guild.id, e, exc_info=True)
+        await interaction.followup.send(f'Không reset vì backup DB thất bại: `{e}`', ephemeral=True)
+        return
+
+    with guild_data_context(guild.id):
+        save_data({})
+    cleared_runtime = _clear_runtime_tracking_for_guild(guild.id)
+    with contextlib.suppress(Exception):
+        await update_live_message(guild)
+
+    log.warning(
+        '[Admin] %s (%s) reset all study/economy data for guild %s after backup %s',
+        interaction.user, interaction.user.id, guild.id, backup_path,
+    )
+    await interaction.followup.send(
+        f'Đã reset study/economy data cho **{guild.name}**.\n'
+        f'Backup trước reset: `{backup_path}`\n'
+        f'Runtime sessions cleared: `{cleared_runtime}`\n'
+        'Config, ACL rules, plugin settings, and class-role setup were kept.',
+        ephemeral=True,
+    )
+
+
+admin_group.add_command(admin_coins_group)
 bot.tree.add_command(admin_group)
 
 
-@bot.tree.command(name='syncroles', description='Đồng bộ vai trò (Admin)')
-@app_commands.default_permissions(administrator=True)
 async def slash_syncroles(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.syncroles'):
+        return
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     if not guild:
@@ -6677,17 +7101,16 @@ async def slash_syncroles(interaction: discord.Interaction):
         msg += f'\n⚠️ Role bot cần nằm cao hơn: **{role_list}**.'
     await interaction.followup.send(msg, ephemeral=True)
 
-@bot.tree.command(name='report', description='Gửi báo cáo ngay (Admin)')
-@app_commands.default_permissions(administrator=True)
 async def slash_report(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.report'):
+        return
     await interaction.response.defer(ephemeral=True)
     await _send_report(interaction.guild)
     await interaction.followup.send('✅ Đã gửi báo cáo!', ephemeral=True)
 
-@bot.tree.command(name='dailyboard', description='Gửi bảng tổng kết ngày (Admin)')
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(date='Ngày cần báo cáo YYYY-MM-DD (để trống = hôm qua)')
 async def slash_dailyboard(interaction: discord.Interaction, date: str = None):
+    if not await _require_admin(interaction, 'admin.dailyboard'):
+        return
     if date is not None:
         try:
             datetime.strptime(date, '%Y-%m-%d')
@@ -6701,9 +7124,9 @@ async def slash_dailyboard(interaction: discord.Interaction, date: str = None):
     await _send_daily_board(date, interaction.guild)
     await interaction.followup.send('✅ Đã gửi bảng tổng kết ngày!', ephemeral=True)
 
-@bot.tree.command(name='updatelive', description='Cập nhật live message (Admin)')
-@app_commands.default_permissions(administrator=True)
 async def slash_updatelive(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.updatelive'):
+        return
     await interaction.response.defer(ephemeral=True)
     if interaction.guild:
         await update_live_message(interaction.guild)
@@ -6711,9 +7134,9 @@ async def slash_updatelive(interaction: discord.Interaction):
         await update_all_live_messages()
     await interaction.followup.send('✅ Đã cập nhật!', ephemeral=True)
 
-@bot.tree.command(name='backup', description='Backup dữ liệu ngay lập tức (Admin)')
-@app_commands.default_permissions(administrator=True)
 async def slash_backup(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.backup'):
+        return
     await interaction.response.defer(ephemeral=True)
     backup_data()
     backups = sorted(os.listdir(BACKUP_DIR)) if os.path.exists(BACKUP_DIR) else []
@@ -6863,31 +7286,59 @@ def extract_question_from_mention(message: discord.Message) -> str:
         raw = raw.replace(mention, '')
     return raw.strip()
 
+
+def _install_study_context():
+    """Expose stable helper APIs to plugins without importing bot.py.
+
+    The feature migration is intentionally gradual. Plugins use this context as
+    a narrow compatibility boundary while large legacy commands are moved out of
+    this file over time.
+    """
+    bot.study_context = SimpleNamespace(
+        database=database,
+        repository=repository,
+        config_manager=config_manager,
+        acl_manager=acl_manager,
+        plugin_manager=plugin_manager,
+        acl_check=acl_check,
+        is_admin_actor=_is_admin_actor,
+        require_admin=_require_admin,
+        require_moderator=_require_moderator,
+        ask_ai=_ask_ai,
+        load_data=load_data,
+        save_data=save_data,
+        update_data=update_data,
+        guild_data_context=guild_data_context,
+        add_study_time=add_study_time,
+        add_xp_direct=add_xp_direct,
+        safe_send_dm=safe_send_dm,
+        format_time=format_time,
+        sync_member_progress=_sync_member_progress,
+        badges=BADGES,
+        class_thresholds=CLASS_THRESHOLDS,
+        class_names=CLASS_NAMES,
+    )
+
+
+async def _ensure_core_cogs_loaded():
+    global _core_cogs_ready
+    if _core_cogs_ready:
+        return
+    for command_name in ('acl', 'bot', 'config'):
+        bot.tree.remove_command(command_name)
+    _core_cogs_ready = True
+
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    try:
-        mentioned_bot = bot.user is not None and bot.user in message.mentions
-        if mentioned_bot:
-            question = extract_question_from_mention(message)
-            if not question:
-                await message.reply(
-                    'Bạn hãy tag bot kèm câu hỏi nhé. Ví dụ: `@bot giải thích Markov chain`',
-                    mention_author=False,
-                )
-            else:
-                async with message.channel.typing():
-                    answer = await _ask_ai(question)
-                await message.reply(answer, mention_author=False)
-    finally:
+    if not message.author.bot:
         await bot.process_commands(message)
 
 @bot.event
 async def on_ready():
     log.info(f'✅ Bot {bot.user.name} ready!')
     initialize_database()
+    _install_study_context()
+    await _ensure_core_cogs_loaded()
     for guild in bot.guilds:
         _apply_legacy_env_config_if_empty(guild)
     if not join_times:
@@ -6899,44 +7350,17 @@ async def on_ready():
             bot.add_view(RoomPanelView())
             _room_panel_view_registered = True
 
-        if not bot.cogs.get('PomodoroCog'):
-            try:
-                cog = create_pomodoro_cog(
-                    bot, add_study_time, safe_send_dm, format_time,
-                    load_data_fn=load_data, save_data_fn=save_data,
-                    add_xp_fn=add_xp_direct, update_data_fn=update_data,
-                    progress_sync_fn=_sync_member_progress,
-                )
-                await bot.add_cog(cog)
-                log.info('✅ Pomodoro Cog loaded')
-            except Exception as e:
-                log.error(f'Pomodoro error: {e}', exc_info=True)
-
-        try:
-            await setup_weekly_report(
-                bot, load_data, save_data, BADGES, safe_send_dm,
-                update_data_fn=update_data,
-                class_thresholds=CLASS_THRESHOLDS,
-                class_names=CLASS_NAMES,
-                guild_context_fn=guild_data_context,
-            )
-        except Exception as e:
-            log.error(f'WeeklyReport error: {e}', exc_info=True)
-
-        _startup_extensions_ready = (
-            bot.cogs.get('PomodoroCog') is not None
-            and bot.cogs.get('WeeklyReport') is not None
-        )
+        results = await plugin_manager.load_autoloaded(sync=False)
+        for plugin_name, ok, message in results:
+            if ok:
+                log.info('[Startup] Plugin %s ready: %s', plugin_name, message)
+            else:
+                log.error('[Startup] Plugin %s failed: %s', plugin_name, message)
+        _startup_extensions_ready = True
     else:
         log.info('[Startup] Extension setup already completed; skipping.')
 
-    for guild in bot.guilds:
-        try:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            log.info(f'Sync {len(synced)} cmds → {guild.name}')
-        except Exception as e:
-            log.error(f'Sync error {guild.name}: {e}')
+    await plugin_manager.sync_commands(reason='startup')
 
     guild_class_role_ids: dict[int, dict[int, int]] = {}
     for guild in bot.guilds:
@@ -7054,6 +7478,42 @@ async def on_ready():
 async def on_disconnect():
     await _flush_active_sessions('disconnect')
 
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild = member.guild
+    _capture_guild_context(guild.id)
+    channel_id = config_manager.get(guild.id, 'welcome_channel_id')
+    if not channel_id:
+        log.info('[Welcome] No welcome_channel_id configured for guild %s; skipping member %s', guild.id, member.id)
+        return
+
+    channel = guild.get_channel(int(channel_id))
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('[Welcome] Configured welcome channel %s not found in guild %s', channel_id, guild.id)
+        return
+
+    embed = discord.Embed(
+        title='Chào mừng',
+        description=(
+            f'{member.mention}, chào mừng bạn đến với server. '
+            'Chúc bạn học tập hiệu quả và tiến bộ mỗi ngày.'
+        ),
+        color=NOTIFY_GREEN,
+    )
+    embed.set_footer(text='One percent better every day')
+
+    try:
+        await channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.Forbidden:
+        log.warning('[Welcome] Missing permission to send welcome message in channel %s for guild %s', channel.id, guild.id)
+    except discord.HTTPException:
+        log.warning('[Welcome] Failed to send welcome message in channel %s for guild %s', channel.id, guild.id, exc_info=True)
+
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if member.bot: return
@@ -7131,13 +7591,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             description=(
                 f'Chào mừng {member.display_name} vào phòng học.'
             ),
-            color=NOTIFY_BLUE,
-        )
-        await send_voice_notice(
-            channel=after.channel,
-            member=member,
-            title='Động lực hôm nay',
-            description=_random_motivation_plain(),
             color=NOTIFY_BLUE,
         )
         if not is_media_active(after):

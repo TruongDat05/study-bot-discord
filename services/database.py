@@ -97,9 +97,64 @@ class DatabaseService:
         conn = self.connect()
         try:
             conn.executescript(SCHEMA_SQL)
+            self._apply_additive_migrations(conn)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _column_names(conn, table: str) -> set[str]:
+        rows = conn.execute(f'PRAGMA table_info({table})').fetchall()
+        return {str(row['name']) for row in rows}
+
+    def _add_column_if_missing(self, conn, table: str, column: str, definition: str) -> None:
+        if column not in self._column_names(conn, table):
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN {definition}')
+
+    def _apply_additive_migrations(self, conn) -> None:
+        """Keep older SQLite databases compatible with the plugin schema."""
+        migrations = {
+            'study_sessions': [
+                ('active_seconds', 'active_seconds INTEGER NOT NULL DEFAULT 0'),
+                ('used_camera', 'used_camera INTEGER NOT NULL DEFAULT 0'),
+                ('used_stream', 'used_stream INTEGER NOT NULL DEFAULT 0'),
+            ],
+            'daily_stats': [
+                ('completed_tasks', 'completed_tasks INTEGER NOT NULL DEFAULT 0'),
+                ('task_rewarded_coins', 'task_rewarded_coins INTEGER NOT NULL DEFAULT 0'),
+            ],
+            'tasks': [
+                ('reward_coins', 'reward_coins INTEGER NOT NULL DEFAULT 0'),
+                ('reward_claimed', 'reward_claimed INTEGER NOT NULL DEFAULT 0'),
+            ],
+            'private_rooms': [
+                ('expires_at', 'expires_at TEXT'),
+                ('locked', 'locked INTEGER NOT NULL DEFAULT 0'),
+                ('rent_paid_coins', 'rent_paid_coins INTEGER NOT NULL DEFAULT 0'),
+                ('deleted_at', 'deleted_at TEXT'),
+            ],
+            'scheduled_sessions': [
+                ('status', "status TEXT NOT NULL DEFAULT 'booked'"),
+                ('cancelled_at', 'cancelled_at TEXT'),
+                ('completed_at', 'completed_at TEXT'),
+                ('created_at', "created_at TEXT NOT NULL DEFAULT ''"),
+            ],
+            'reminders': [
+                ('channel_id', 'channel_id INTEGER'),
+                ('sent_at', 'sent_at TEXT'),
+            ],
+            'achievements': [
+                ('notified', 'notified INTEGER NOT NULL DEFAULT 0'),
+            ],
+        }
+        for table, columns in migrations.items():
+            existing = self._column_names(conn, table)
+            if not existing:
+                continue
+            for column, definition in columns:
+                if column not in existing:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {definition}')
+                    existing.add(column)
 
     def status(self) -> dict:
         if self.backend != 'sqlite':
@@ -114,6 +169,8 @@ class DatabaseService:
                 'economy_accounts', 'transactions', 'loans', 'loan_offers',
                 'user_notifications', 'class_roles', 'sent_milestones',
                 'runtime_sessions', 'runtime_snapshots',
+                'guild_config_values', 'acl_rules', 'tasks', 'private_rooms',
+                'scheduled_sessions', 'reminders', 'achievements',
             ):
                 counts[table] = conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
         return {
@@ -190,6 +247,8 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     study_seconds INTEGER NOT NULL DEFAULT 0,
     earned_coins INTEGER NOT NULL DEFAULT 0,
     sessions_count INTEGER NOT NULL DEFAULT 0,
+    completed_tasks INTEGER NOT NULL DEFAULT 0,
+    task_rewarded_coins INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id, date),
     FOREIGN KEY (guild_id, user_id) REFERENCES users(guild_id, user_id) ON DELETE CASCADE
 );
@@ -270,8 +329,91 @@ CREATE TABLE IF NOT EXISTS study_sessions (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     duration_seconds INTEGER NOT NULL DEFAULT 0,
+    active_seconds INTEGER NOT NULL DEFAULT 0,
+    used_camera INTEGER NOT NULL DEFAULT 0,
+    used_stream INTEGER NOT NULL DEFAULT 0,
     earned_coins INTEGER NOT NULL DEFAULT 0,
     ended_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    reward_coins INTEGER NOT NULL DEFAULT 0,
+    reward_claimed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_owner
+ON tasks (guild_id, user_id, completed, created_at);
+
+CREATE TABLE IF NOT EXISTS private_rooms (
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    owner_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    locked INTEGER NOT NULL DEFAULT 0,
+    rent_paid_coins INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT,
+    PRIMARY KEY (guild_id, channel_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_rooms_owner
+ON private_rooms (guild_id, owner_id);
+
+CREATE TABLE IF NOT EXISTS scheduled_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    start_at TEXT NOT NULL,
+    duration_minutes INTEGER NOT NULL DEFAULT 60,
+    attended INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    deposit_coins INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'booked',
+    created_at TEXT NOT NULL,
+    cancelled_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_owner
+ON scheduled_sessions (guild_id, user_id, start_at);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_due
+ON scheduled_sessions (status, start_at);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    remind_at TEXT NOT NULL,
+    message TEXT NOT NULL,
+    channel_id INTEGER,
+    sent INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_due
+ON reminders (sent, remind_at);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_owner
+ON reminders (guild_id, user_id, sent, remind_at);
+
+CREATE TABLE IF NOT EXISTS achievements (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    achievement_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    unlocked_at TEXT NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, achievement_key)
 );
 
 CREATE TABLE IF NOT EXISTS runtime_sessions (
@@ -293,4 +435,39 @@ CREATE TABLE IF NOT EXISTS runtime_snapshots (
     state_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS guild_config_values (
+    guild_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT,
+    type TEXT NOT NULL DEFAULT 'string',
+    updated_by INTEGER,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_guild_config_values_guild
+ON guild_config_values (guild_id);
+
+CREATE TABLE IF NOT EXISTS acl_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+    user_id INTEGER,
+    role_id INTEGER,
+    channel_id INTEGER,
+    category_id INTEGER,
+    priority INTEGER NOT NULL DEFAULT 100,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acl_rules_lookup
+ON acl_rules (guild_id, action, enabled, priority);
+
+CREATE INDEX IF NOT EXISTS idx_acl_rules_subjects
+ON acl_rules (guild_id, user_id, role_id, channel_id, category_id);
 """

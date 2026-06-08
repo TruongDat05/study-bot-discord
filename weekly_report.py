@@ -285,6 +285,7 @@ def create_weekly_report_cog(
     class_thresholds=None,
     class_names=None,
     guild_context_fn=None,
+    require_admin_fn=None,
 ):
     configure_class_config(class_thresholds, class_names)
 
@@ -525,6 +526,8 @@ def create_weekly_report_cog(
             self, interaction: discord.Interaction,
             target: discord.Member = None,
         ):
+            if require_admin_fn is not None and not await require_admin_fn(interaction, 'weekly.send'):
+                return
             await interaction.response.defer(ephemeral=True)
             sent, skipped = await self._do_send_reports(specific_member=target)
             if target:
@@ -707,6 +710,7 @@ async def setup_weekly_report(
     class_thresholds=None,
     class_names=None,
     guild_context_fn=None,
+    require_admin_fn=None,
 ):
     configure_class_config(class_thresholds, class_names)
     if bot.cogs.get('WeeklyReport'):
@@ -717,6 +721,7 @@ async def setup_weekly_report(
         class_thresholds=class_thresholds,
         class_names=class_names,
         guild_context_fn=guild_context_fn,
+        require_admin_fn=require_admin_fn,
     )
     await bot.add_cog(cog)
     # Ghi chú: bot.add_cog tự động đăng ký weekly_group vào bot.tree

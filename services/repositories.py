@@ -5,7 +5,7 @@ import logging
 import shutil
 import uuid
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -46,6 +46,10 @@ class BotRepository:
     def __init__(self, db: DatabaseService, default_coins_per_minute: int = 10):
         self.db = db
         self.default_coins_per_minute = int(default_coins_per_minute)
+
+    @staticmethod
+    def _table_columns(conn, table: str) -> set[str]:
+        return {str(row['name']) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
 
     def initialize(self):
         self.db.initialize()
@@ -182,6 +186,30 @@ class BotRepository:
     def _replace_guild_data(self, conn, guild_id: int, data: dict):
         guild_id = int(guild_id)
         try:
+            task_stats: dict[tuple[int, str], dict[str, int]] = {}
+            if self._table_columns(conn, 'tasks'):
+                rows = conn.execute(
+                    """
+                    SELECT
+                        user_id,
+                        substr(completed_at, 1, 10) AS date,
+                        COUNT(*) AS completed_tasks,
+                        COALESCE(SUM(reward_coins), 0) AS task_rewarded_coins
+                    FROM tasks
+                    WHERE guild_id = ? AND completed = 1 AND completed_at IS NOT NULL
+                    GROUP BY user_id, substr(completed_at, 1, 10)
+                    """,
+                    (guild_id,),
+                ).fetchall()
+                task_stats = {
+                    (int(row['user_id']), str(row['date'])): {
+                        'completed_tasks': _as_int(row['completed_tasks'], 0),
+                        'task_rewarded_coins': _as_int(row['task_rewarded_coins'], 0),
+                    }
+                    for row in rows
+                    if row['date']
+                }
+
             for table in (
                 'sent_milestones', 'user_notifications', 'loan_offers', 'loans',
                 'transactions', 'daily_stats', 'economy_accounts', 'users',
@@ -237,17 +265,44 @@ class BotRepository:
                 )
                 daily = info.get('daily') if isinstance(info.get('daily'), dict) else {}
                 earnings = info.get('daily_earnings') if isinstance(info.get('daily_earnings'), dict) else {}
+                inserted_days: set[str] = set()
                 for day, seconds in daily.items():
+                    inserted_days.add(str(day))
+                    task_day = task_stats.get((user_id, str(day)), {})
+                    task_rewarded = _as_int(task_day.get('task_rewarded_coins', 0))
                     conn.execute(
                         """
                         INSERT INTO daily_stats (
-                            guild_id, user_id, date, study_seconds, earned_coins, sessions_count
-                        ) VALUES (?, ?, ?, ?, ?, ?)
+                            guild_id, user_id, date, study_seconds, earned_coins,
+                            sessions_count, completed_tasks, task_rewarded_coins
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             guild_id, user_id, str(day), _as_int(seconds),
-                            _as_int(earnings.get(day, 0)),
+                            _as_int(earnings.get(day, 0)) + task_rewarded,
                             0,
+                            _as_int(task_day.get('completed_tasks', 0)),
+                            task_rewarded,
+                        ),
+                    )
+                for (task_user_id, day), task_day in task_stats.items():
+                    if task_user_id != user_id or day in inserted_days:
+                        continue
+                    task_rewarded = _as_int(task_day.get('task_rewarded_coins', 0))
+                    conn.execute(
+                        """
+                        INSERT INTO daily_stats (
+                            guild_id, user_id, date, study_seconds, earned_coins,
+                            sessions_count, completed_tasks, task_rewarded_coins
+                        ) VALUES (?, ?, ?, 0, ?, 0, ?, ?)
+                        """,
+                        (
+                            guild_id,
+                            user_id,
+                            day,
+                            task_rewarded,
+                            _as_int(task_day.get('completed_tasks', 0)),
+                            task_rewarded,
                         ),
                     )
                 for tx in info.get('transactions', []) or []:
@@ -344,6 +399,886 @@ class BotRepository:
         except Exception:
             log.error('[DB] Failed to replace guild data for guild_id=%s; transaction will roll back.', guild_id, exc_info=True)
             raise
+
+    @staticmethod
+    def _row_dict(row) -> dict:
+        return dict(row) if row else {}
+
+    def _minimal_profile(self, display_name: str) -> dict:
+        return {
+            'name': str(display_name or 'Unknown'),
+            'total': 0,
+            'balance': 0,
+            'total_earned': 0,
+            'debt': 0,
+            'credit_score': 600,
+            'coins_acc_secs': 0,
+            'class': 0,
+            'level': 0,
+            'class_name': '',
+            'streak': 0,
+            'longest_streak': 0,
+            'daily': {},
+            'daily_earnings': {},
+            'transactions': [],
+            'active_loans': [],
+            'loan_offers': [],
+            'badges': [],
+            'special_flags': [],
+            'notifications_enabled': True,
+        }
+
+    def _ensure_user_account_conn(
+        self,
+        conn,
+        guild_id: int,
+        user_id: int,
+        display_name: str | None = None,
+    ) -> tuple[dict, dict]:
+        guild_id = int(guild_id)
+        user_id = int(user_id)
+        now = _now()
+        row = conn.execute(
+            'SELECT profile_json FROM users WHERE guild_id = ? AND user_id = ?',
+            (guild_id, user_id),
+        ).fetchone()
+        if row:
+            profile = _json_loads(row['profile_json'], {})
+        else:
+            profile = self._minimal_profile(display_name or f'User {user_id}')
+
+        if display_name:
+            profile['name'] = str(display_name)
+        profile.setdefault('balance', 0)
+        profile.setdefault('total_earned', 0)
+        profile.setdefault('debt', 0)
+        profile.setdefault('credit_score', 600)
+        profile.setdefault('coins_acc_secs', 0)
+        profile.setdefault('class', _as_int(profile.get('level', 0)))
+        profile.setdefault('level', _as_int(profile.get('class', 0)))
+        profile.setdefault('transactions', [])
+
+        class_level = _as_int(profile.get('class', profile.get('level', 0)))
+        conn.execute(
+            """
+            INSERT INTO users (
+                guild_id, user_id, display_name, class_level, class_name,
+                streak, longest_streak, notifications_enabled, profile_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                class_level = excluded.class_level,
+                class_name = excluded.class_name,
+                streak = excluded.streak,
+                longest_streak = excluded.longest_streak,
+                notifications_enabled = excluded.notifications_enabled,
+                profile_json = excluded.profile_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                guild_id, user_id, str(profile.get('name') or display_name or f'User {user_id}'),
+                class_level, str(profile.get('class_name') or ''),
+                _as_int(profile.get('streak', 0)),
+                _as_int(profile.get('longest_streak', 0)),
+                1 if profile.get('notifications_enabled', True) else 0,
+                _json_dumps(profile), now, now,
+            ),
+        )
+
+        account_row = conn.execute(
+            'SELECT * FROM economy_accounts WHERE guild_id = ? AND user_id = ?',
+            (guild_id, user_id),
+        ).fetchone()
+        if not account_row:
+            conn.execute(
+                """
+                INSERT INTO economy_accounts (
+                    guild_id, user_id, balance, total_earned, debt,
+                    credit_score, coins_acc_secs
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id, user_id,
+                    _as_int(profile.get('balance', 0)),
+                    _as_int(profile.get('total_earned', 0)),
+                    _as_int(profile.get('debt', 0)),
+                    _as_int(profile.get('credit_score', 600)),
+                    _as_int(profile.get('coins_acc_secs', 0)),
+                ),
+            )
+            account_row = conn.execute(
+                'SELECT * FROM economy_accounts WHERE guild_id = ? AND user_id = ?',
+                (guild_id, user_id),
+            ).fetchone()
+        account = self._row_dict(account_row)
+        return profile, account
+
+    def _write_profile_conn(self, conn, guild_id: int, user_id: int, profile: dict) -> None:
+        now = _now()
+        class_level = _as_int(profile.get('class', profile.get('level', 0)))
+        conn.execute(
+            """
+            UPDATE users
+            SET display_name = ?, class_level = ?, class_name = ?, streak = ?,
+                longest_streak = ?, notifications_enabled = ?, profile_json = ?,
+                updated_at = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (
+                str(profile.get('name') or f'User {user_id}'),
+                class_level,
+                str(profile.get('class_name') or ''),
+                _as_int(profile.get('streak', 0)),
+                _as_int(profile.get('longest_streak', 0)),
+                1 if profile.get('notifications_enabled', True) else 0,
+                _json_dumps(profile),
+                now,
+                int(guild_id),
+                int(user_id),
+            ),
+        )
+
+    def _append_profile_transaction(
+        self,
+        profile: dict,
+        *,
+        tx_id: str,
+        tx_type: str,
+        amount: int,
+        balance_after: int,
+        description: str,
+        created_at: str,
+        counterparty: int | str | None = None,
+        meta: dict | None = None,
+    ) -> None:
+        tx = {
+            'id': tx_id,
+            'type': tx_type,
+            'amount': int(amount),
+            'balance': int(balance_after),
+            'balance_after': int(balance_after),
+            'description': str(description),
+            'ts': created_at,
+        }
+        if counterparty is not None:
+            tx['counterparty'] = str(counterparty)
+        if meta:
+            tx.update(meta)
+        profile.setdefault('transactions', []).append(tx)
+        profile['transactions'] = profile.get('transactions', [])[-100:]
+
+    def _record_transaction_conn(
+        self,
+        conn,
+        *,
+        guild_id: int,
+        user_id: int,
+        tx_type: str,
+        amount: int,
+        balance_after: int,
+        description: str,
+        payload: dict | None = None,
+        created_at: str | None = None,
+    ) -> str:
+        tx_id = f'tx_{uuid.uuid4().hex}'
+        created_at = created_at or _now()
+        conn.execute(
+            """
+            INSERT INTO transactions (
+                id, guild_id, user_id, type, amount, balance_after,
+                description, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tx_id, int(guild_id), int(user_id), str(tx_type), int(amount),
+                int(balance_after), str(description), _json_dumps(payload or {}),
+                created_at,
+            ),
+        )
+        return tx_id
+
+    def _change_balance_conn(
+        self,
+        conn,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str | None,
+        amount: int,
+        tx_type: str,
+        description: str,
+        count_as_earned: bool = False,
+        allow_negative: bool = False,
+        payload: dict | None = None,
+    ) -> dict:
+        amount = int(amount)
+        profile, account = self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+        balance_before = _as_int(account.get('balance', profile.get('balance', 0)))
+        total_earned_before = _as_int(account.get('total_earned', profile.get('total_earned', 0)))
+        balance_after = balance_before + amount
+        if balance_after < 0 and not allow_negative:
+            raise ValueError(f'Balance không đủ. Hiện có {balance_before:,} coins.')
+        total_earned_after = total_earned_before + (amount if count_as_earned and amount > 0 else 0)
+        conn.execute(
+            """
+            UPDATE economy_accounts
+            SET balance = ?, total_earned = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (balance_after, total_earned_after, int(guild_id), int(user_id)),
+        )
+        profile['balance'] = balance_after
+        profile['total_earned'] = total_earned_after
+        tx_id = self._record_transaction_conn(
+            conn,
+            guild_id=guild_id,
+            user_id=user_id,
+            tx_type=tx_type,
+            amount=amount,
+            balance_after=balance_after,
+            description=description,
+            payload=payload,
+        )
+        self._append_profile_transaction(
+            profile,
+            tx_id=tx_id,
+            tx_type=tx_type,
+            amount=amount,
+            balance_after=balance_after,
+            description=description,
+            created_at=_now(),
+            meta=payload,
+        )
+        self._write_profile_conn(conn, guild_id, user_id, profile)
+        return {
+            'balance': balance_after,
+            'total_earned': total_earned_after,
+            'transaction_id': tx_id,
+        }
+
+    def create_task(self, guild_id: int, user_id: int, display_name: str, content: str) -> int:
+        content = str(content or '').strip()
+        if not content:
+            raise ValueError('Task content is required.')
+        with self.db.transaction() as conn:
+            self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            cur = conn.execute(
+                """
+                INSERT INTO tasks (guild_id, user_id, content, completed, created_at)
+                VALUES (?, ?, ?, 0, ?)
+                """,
+                (int(guild_id), int(user_id), content[:500], _now()),
+            )
+            return int(cur.lastrowid)
+
+    def list_tasks(self, guild_id: int, user_id: int, *, include_completed: bool = False, limit: int = 50) -> list[dict]:
+        query = """
+            SELECT * FROM tasks
+            WHERE guild_id = ? AND user_id = ?
+        """
+        params: list = [int(guild_id), int(user_id)]
+        if not include_completed:
+            query += ' AND completed = 0'
+        query += ' ORDER BY completed ASC, id ASC LIMIT ?'
+        params.append(int(limit))
+        with self.db.read_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_dict(row) for row in rows]
+
+    def complete_task(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        task_id: int,
+        reward_coins: int = 5,
+        daily_reward_cap: int = 10,
+    ) -> dict:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE guild_id = ? AND user_id = ? AND id = ?
+                """,
+                (int(guild_id), int(user_id), int(task_id)),
+            ).fetchone()
+            if not row:
+                return {'ok': False, 'message': 'Không tìm thấy task.'}
+            task = self._row_dict(row)
+            if task.get('completed'):
+                return {'ok': False, 'message': 'Task này đã hoàn thành rồi.'}
+
+            today = datetime.now().date().isoformat()
+            reward_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM transactions
+                WHERE guild_id = ? AND user_id = ? AND type = 'task_reward'
+                  AND created_at LIKE ?
+                """,
+                (int(guild_id), int(user_id), f'{today}%'),
+            ).fetchone()[0]
+            reward = int(reward_coins) if reward_count < int(daily_reward_cap) else 0
+            completed_at = _now()
+            conn.execute(
+                """
+                UPDATE tasks
+                SET completed = 1, completed_at = ?, reward_coins = ?, reward_claimed = 1
+                WHERE guild_id = ? AND user_id = ? AND id = ?
+                """,
+                (completed_at, reward, int(guild_id), int(user_id), int(task_id)),
+            )
+            self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO daily_stats (
+                    guild_id, user_id, date, study_seconds, earned_coins,
+                    sessions_count, completed_tasks, task_rewarded_coins
+                ) VALUES (?, ?, ?, 0, 0, 0, 0, 0)
+                """,
+                (int(guild_id), int(user_id), today),
+            )
+            conn.execute(
+                """
+                UPDATE daily_stats
+                SET completed_tasks = completed_tasks + 1,
+                    earned_coins = earned_coins + ?,
+                    task_rewarded_coins = task_rewarded_coins + ?
+                WHERE guild_id = ? AND user_id = ? AND date = ?
+                """,
+                (reward, reward, int(guild_id), int(user_id), today),
+            )
+            balance = None
+            if reward:
+                change = self._change_balance_conn(
+                    conn,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    amount=reward,
+                    tx_type='task_reward',
+                    description=f'Task completed: {task.get("content", "")[:80]}',
+                    count_as_earned=True,
+                    payload={'task_id': int(task_id)},
+                )
+                balance = change['balance']
+            message = f'Đã hoàn thành task #{task_id}.'
+            if reward:
+                message += f' +{reward:,} coins. Balance: {balance:,}.'
+            else:
+                message += ' Hôm nay bạn đã đạt giới hạn reward task.'
+            return {'ok': True, 'message': message, 'reward': reward, 'balance': balance}
+
+    def delete_task(self, guild_id: int, user_id: int, task_id: int) -> bool:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                'DELETE FROM tasks WHERE guild_id = ? AND user_id = ? AND id = ?',
+                (int(guild_id), int(user_id), int(task_id)),
+            )
+            return cur.rowcount > 0
+
+    def clear_tasks(self, guild_id: int, user_id: int, *, completed_only: bool = False) -> int:
+        query = 'DELETE FROM tasks WHERE guild_id = ? AND user_id = ?'
+        params: list = [int(guild_id), int(user_id)]
+        if completed_only:
+            query += ' AND completed = 1'
+        with self.db.transaction() as conn:
+            cur = conn.execute(query, params)
+            return int(cur.rowcount)
+
+    def get_private_room(self, guild_id: int, channel_id: int) -> dict:
+        with self.db.read_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM private_rooms
+                WHERE guild_id = ? AND channel_id = ? AND deleted_at IS NULL
+                """,
+                (int(guild_id), int(channel_id)),
+            ).fetchone()
+            return self._row_dict(row)
+
+    def list_active_private_rooms(self, guild_id: int | None = None) -> list[dict]:
+        query = 'SELECT * FROM private_rooms WHERE deleted_at IS NULL'
+        params: list = []
+        if guild_id is not None:
+            query += ' AND guild_id = ?'
+            params.append(int(guild_id))
+        query += ' ORDER BY created_at ASC'
+        with self.db.read_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_dict(row) for row in rows]
+
+    def create_private_room(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        owner_id: int,
+        owner_name: str,
+        expires_at: str | None = None,
+        rent_paid_coins: int = 0,
+    ) -> dict:
+        with self.db.transaction() as conn:
+            if rent_paid_coins:
+                self._change_balance_conn(
+                    conn,
+                    guild_id=guild_id,
+                    user_id=owner_id,
+                    display_name=owner_name,
+                    amount=-abs(int(rent_paid_coins)),
+                    tx_type='room_rent',
+                    description='Private study room rent',
+                    payload={'channel_id': int(channel_id), 'expires_at': expires_at},
+                )
+            else:
+                self._ensure_user_account_conn(conn, guild_id, owner_id, owner_name)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO private_rooms (
+                    guild_id, channel_id, owner_id, created_at, expires_at,
+                    locked, rent_paid_coins, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL)
+                """,
+                (
+                    int(guild_id), int(channel_id), int(owner_id), _now(),
+                    expires_at, int(rent_paid_coins),
+                ),
+            )
+            return self.get_private_room_in_conn(conn, guild_id, channel_id)
+
+    def get_private_room_in_conn(self, conn, guild_id: int, channel_id: int) -> dict:
+        row = conn.execute(
+            """
+            SELECT * FROM private_rooms
+            WHERE guild_id = ? AND channel_id = ? AND deleted_at IS NULL
+            """,
+            (int(guild_id), int(channel_id)),
+        ).fetchone()
+        return self._row_dict(row)
+
+    def set_private_room_locked(self, guild_id: int, channel_id: int, locked: bool) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE private_rooms
+                SET locked = ?
+                WHERE guild_id = ? AND channel_id = ? AND deleted_at IS NULL
+                """,
+                (1 if locked else 0, int(guild_id), int(channel_id)),
+            )
+
+    def delete_private_room(self, guild_id: int, channel_id: int) -> bool:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                UPDATE private_rooms
+                SET deleted_at = ?
+                WHERE guild_id = ? AND channel_id = ? AND deleted_at IS NULL
+                """,
+                (_now(), int(guild_id), int(channel_id)),
+            )
+            return cur.rowcount > 0
+
+    def create_scheduled_session(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        start_at: str,
+        duration_minutes: int,
+        deposit_coins: int = 0,
+    ) -> dict:
+        with self.db.transaction() as conn:
+            if deposit_coins:
+                self._change_balance_conn(
+                    conn,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    amount=-abs(int(deposit_coins)),
+                    tx_type='schedule_deposit',
+                    description='Study accountability session deposit',
+                    payload={'start_at': start_at, 'duration_minutes': int(duration_minutes)},
+                )
+            else:
+                self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            cur = conn.execute(
+                """
+                INSERT INTO scheduled_sessions (
+                    guild_id, user_id, start_at, duration_minutes, attended,
+                    completed, deposit_coins, status, created_at
+                ) VALUES (?, ?, ?, ?, 0, 0, ?, 'booked', ?)
+                """,
+                (
+                    int(guild_id), int(user_id), str(start_at), int(duration_minutes),
+                    int(deposit_coins), _now(),
+                ),
+            )
+            session_id = int(cur.lastrowid)
+            return self.get_scheduled_session_in_conn(conn, guild_id, session_id)
+
+    def get_scheduled_session_in_conn(self, conn, guild_id: int, session_id: int) -> dict:
+        row = conn.execute(
+            'SELECT * FROM scheduled_sessions WHERE guild_id = ? AND id = ?',
+            (int(guild_id), int(session_id)),
+        ).fetchone()
+        return self._row_dict(row)
+
+    def list_scheduled_sessions(self, guild_id: int, user_id: int | None = None, *, include_done: bool = False) -> list[dict]:
+        query = 'SELECT * FROM scheduled_sessions WHERE guild_id = ?'
+        params: list = [int(guild_id)]
+        if user_id is not None:
+            query += ' AND user_id = ?'
+            params.append(int(user_id))
+        if not include_done:
+            query += " AND status = 'booked'"
+        query += ' ORDER BY start_at ASC LIMIT 50'
+        with self.db.read_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_dict(row) for row in rows]
+
+    def cancel_scheduled_session(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        session_id: int,
+        admin_override: bool = False,
+    ) -> dict:
+        with self.db.transaction() as conn:
+            session = self.get_scheduled_session_in_conn(conn, guild_id, session_id)
+            if not session:
+                return {'ok': False, 'message': 'Không tìm thấy lịch học.'}
+            if int(session['user_id']) != int(user_id) and not admin_override:
+                return {'ok': False, 'message': 'Bạn không sở hữu lịch học này.'}
+            if session.get('status') != 'booked':
+                return {'ok': False, 'message': 'Lịch học này không còn đang booked.'}
+            conn.execute(
+                """
+                UPDATE scheduled_sessions
+                SET status = 'cancelled', cancelled_at = ?
+                WHERE guild_id = ? AND id = ?
+                """,
+                (_now(), int(guild_id), int(session_id)),
+            )
+            deposit = _as_int(session.get('deposit_coins', 0))
+            if deposit > 0:
+                self._change_balance_conn(
+                    conn,
+                    guild_id=guild_id,
+                    user_id=int(session['user_id']),
+                    display_name=display_name,
+                    amount=deposit,
+                    tx_type='schedule_refund',
+                    description='Cancelled study session deposit refund',
+                    payload={'scheduled_session_id': int(session_id)},
+                )
+            message = 'Đã hủy lịch học.'
+            if deposit > 0:
+                message += f' Đã hoàn lại {deposit:,} coins.'
+            return {'ok': True, 'message': message, 'refunded': deposit}
+
+    def create_reminder(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        remind_at: str,
+        message: str,
+        channel_id: int | None = None,
+    ) -> int:
+        with self.db.transaction() as conn:
+            self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            cur = conn.execute(
+                """
+                INSERT INTO reminders (
+                    guild_id, user_id, remind_at, message, channel_id, sent, created_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    int(guild_id), int(user_id), str(remind_at), str(message)[:500],
+                    int(channel_id) if channel_id else None, _now(),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_reminders(self, guild_id: int, user_id: int, *, include_sent: bool = False) -> list[dict]:
+        query = 'SELECT * FROM reminders WHERE guild_id = ? AND user_id = ?'
+        params: list = [int(guild_id), int(user_id)]
+        if not include_sent:
+            query += ' AND sent = 0'
+        query += ' ORDER BY remind_at ASC LIMIT 50'
+        with self.db.read_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_dict(row) for row in rows]
+
+    def cancel_reminder(self, guild_id: int, user_id: int, reminder_id: int) -> bool:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM reminders
+                WHERE guild_id = ? AND user_id = ? AND id = ? AND sent = 0
+                """,
+                (int(guild_id), int(user_id), int(reminder_id)),
+            )
+            return cur.rowcount > 0
+
+    def claim_due_reminders(self, due_at: str, *, limit: int = 25) -> list[dict]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM reminders
+                WHERE sent = 0 AND remind_at <= ?
+                ORDER BY remind_at ASC
+                LIMIT ?
+                """,
+                (str(due_at), int(limit)),
+            ).fetchall()
+            reminders = [self._row_dict(row) for row in rows]
+            if reminders:
+                ids = [int(item['id']) for item in reminders]
+                placeholders = ','.join('?' for _ in ids)
+                conn.execute(
+                    f"UPDATE reminders SET sent = 1, sent_at = ? WHERE id IN ({placeholders})",
+                    [_now(), *ids],
+                )
+            return reminders
+
+    def record_study_session_chunk(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        channel_id: int | None,
+        started_at: str,
+        ended_at: str,
+        duration_seconds: int,
+        active_seconds: int,
+        earned_coins: int = 0,
+        used_camera: bool = False,
+        used_stream: bool = False,
+        ended_reason: str = 'checkpoint',
+    ) -> str:
+        session_id = f'study_{uuid.uuid4().hex}'
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO study_sessions (
+                    id, guild_id, user_id, channel_id, started_at, ended_at,
+                    duration_seconds, active_seconds, used_camera, used_stream,
+                    earned_coins, ended_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    int(guild_id),
+                    int(user_id),
+                    int(channel_id) if channel_id else None,
+                    str(started_at),
+                    str(ended_at),
+                    max(0, int(duration_seconds)),
+                    max(0, int(active_seconds)),
+                    1 if used_camera else 0,
+                    1 if used_stream else 0,
+                    max(0, int(earned_coins)),
+                    str(ended_reason),
+                ),
+            )
+        return session_id
+
+    @staticmethod
+    def _parse_iso_dt(value: str) -> datetime:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _study_seconds_in_window_conn(
+        self,
+        conn,
+        *,
+        guild_id: int,
+        user_id: int,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> int:
+        rows = conn.execute(
+            """
+            SELECT started_at, ended_at, duration_seconds, active_seconds
+            FROM study_sessions
+            WHERE guild_id = ? AND user_id = ?
+              AND ended_at IS NOT NULL
+              AND started_at < ?
+              AND ended_at > ?
+            """,
+            (
+                int(guild_id),
+                int(user_id),
+                end_at.isoformat(timespec='seconds'),
+                start_at.isoformat(timespec='seconds'),
+            ),
+        ).fetchall()
+        total = 0
+        for row in rows:
+            try:
+                session_start = self._parse_iso_dt(row['started_at'])
+                session_end = self._parse_iso_dt(row['ended_at'])
+            except (TypeError, ValueError):
+                continue
+            overlap = max(0, int((min(session_end, end_at) - max(session_start, start_at)).total_seconds()))
+            if not overlap:
+                continue
+            duration = max(1, _as_int(row['duration_seconds'], overlap))
+            active = _as_int(row['active_seconds'], duration) or duration
+            total += min(overlap, int(overlap * min(active, duration) / duration))
+        return total
+
+    def process_due_scheduled_sessions(
+        self,
+        *,
+        due_at: str,
+        attendance_ratio: float = 0.8,
+        completion_bonus_coins: int = 10,
+        grace_minutes: int = 5,
+        limit: int = 25,
+    ) -> list[dict]:
+        due_dt = self._parse_iso_dt(due_at)
+        rows = []
+        with self.db.transaction() as conn:
+            candidates = conn.execute(
+                """
+                SELECT ss.*, u.display_name
+                FROM scheduled_sessions ss
+                LEFT JOIN users u
+                  ON u.guild_id = ss.guild_id AND u.user_id = ss.user_id
+                WHERE ss.status = 'booked'
+                ORDER BY ss.start_at ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+            for row in candidates:
+                session = self._row_dict(row)
+                try:
+                    start_at = self._parse_iso_dt(session['start_at'])
+                except (TypeError, ValueError):
+                    continue
+                duration_seconds = max(60, _as_int(session.get('duration_minutes'), 60) * 60)
+                scheduled_end = start_at.timestamp() + duration_seconds + max(0, int(grace_minutes)) * 60
+                if due_dt.timestamp() < scheduled_end:
+                    continue
+
+                end_at = datetime.fromtimestamp(start_at.timestamp() + duration_seconds, tz=timezone.utc)
+                studied = self._study_seconds_in_window_conn(
+                    conn,
+                    guild_id=session['guild_id'],
+                    user_id=session['user_id'],
+                    start_at=start_at,
+                    end_at=end_at,
+                )
+                required = int(duration_seconds * max(0.0, min(float(attendance_ratio), 1.0)))
+
+                # Older deployments may not have session rows for every study
+                # chunk yet. Fall back to the scheduled day's total so deposits
+                # are not unfairly lost immediately after migration.
+                if studied < required:
+                    day = start_at.date().isoformat()
+                    daily = conn.execute(
+                        """
+                        SELECT study_seconds FROM daily_stats
+                        WHERE guild_id = ? AND user_id = ? AND date = ?
+                        """,
+                        (int(session['guild_id']), int(session['user_id']), day),
+                    ).fetchone()
+                    studied = max(studied, _as_int(daily['study_seconds'], 0) if daily else 0)
+
+                completed = studied >= required
+                deposit = _as_int(session.get('deposit_coins'), 0)
+                bonus = max(0, int(completion_bonus_coins)) if completed else 0
+                status = 'completed' if completed else 'missed'
+                now = _now()
+                conn.execute(
+                    """
+                    UPDATE scheduled_sessions
+                    SET status = ?, attended = ?, completed = 1, completed_at = ?
+                    WHERE guild_id = ? AND id = ? AND status = 'booked'
+                    """,
+                    (
+                        status,
+                        1 if completed else 0,
+                        now,
+                        int(session['guild_id']),
+                        int(session['id']),
+                    ),
+                )
+                refunded = 0
+                if completed and (deposit > 0 or bonus > 0):
+                    display_name = session.get('display_name') or f"User {session['user_id']}"
+                    refunded = deposit + bonus
+                    if deposit > 0:
+                        self._change_balance_conn(
+                            conn,
+                            guild_id=session['guild_id'],
+                            user_id=session['user_id'],
+                            display_name=display_name,
+                            amount=deposit,
+                            tx_type='schedule_refund',
+                            description='Accountability study session deposit refund',
+                            payload={
+                                'scheduled_session_id': int(session['id']),
+                                'studied_seconds': studied,
+                                'required_seconds': required,
+                            },
+                        )
+                    if bonus > 0:
+                        self._change_balance_conn(
+                            conn,
+                            guild_id=session['guild_id'],
+                            user_id=session['user_id'],
+                            display_name=display_name,
+                            amount=bonus,
+                            tx_type='schedule_bonus',
+                            description='Completed accountability study session bonus',
+                            count_as_earned=True,
+                            payload={
+                                'scheduled_session_id': int(session['id']),
+                                'studied_seconds': studied,
+                                'required_seconds': required,
+                            },
+                        )
+                rows.append({
+                    **session,
+                    'status': status,
+                    'studied_seconds': studied,
+                    'required_seconds': required,
+                    'refunded_coins': refunded,
+                    'bonus_coins': bonus,
+                })
+        return rows
+
+    def completed_task_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[dict]:
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    t.user_id,
+                    COALESCE(u.display_name, 'Unknown') AS display_name,
+                    COUNT(*) AS completed_tasks
+                FROM tasks t
+                LEFT JOIN users u
+                  ON u.guild_id = t.guild_id AND u.user_id = t.user_id
+                WHERE t.guild_id = ? AND t.completed = 1
+                GROUP BY t.user_id, u.display_name
+                ORDER BY completed_tasks DESC, display_name ASC
+                LIMIT ?
+                """,
+                (int(guild_id), int(limit)),
+            ).fetchall()
+            return [self._row_dict(row) for row in rows]
 
     def get_class_roles(self, guild_id: int) -> dict[int, int]:
         with self.db.read_connection() as conn:
