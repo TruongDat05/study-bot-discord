@@ -7685,7 +7685,7 @@ async def _ensure_core_cogs_loaded():
     global _core_cogs_ready
     if _core_cogs_ready:
         return
-    for command_name in ('acl', 'bot', 'config'):
+    for command_name in ('bot', 'config'):
         bot.tree.remove_command(command_name)
     _core_cogs_ready = True
 
