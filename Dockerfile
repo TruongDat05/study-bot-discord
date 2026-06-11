@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py pomodoro.py weekly_report.py ./
 COPY services ./services
+COPY plugins ./plugins
 
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin appuser \
