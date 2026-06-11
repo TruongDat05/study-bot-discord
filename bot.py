@@ -96,7 +96,7 @@ OPENROUTER_MODEL        = os.getenv('OPENROUTER_MODEL', 'meta-llama/llama-3.3-70
 HUGGINGFACE_MODEL       = os.getenv('HUGGINGFACE_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3')
 AI_HTTP_TIMEOUT         = max(1.0, _env_float('AI_HTTP_TIMEOUT', 60.0))
 AI_ONE_MESSAGE_LIMIT    = max(1, min(2000, _env_int('AI_ONE_MESSAGE_LIMIT', 1900) or 1900))
-AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1600) or 1600)
+AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1800) or 1800)
 AI_TEMPERATURE          = max(0.0, min(2.0, _env_float('AI_TEMPERATURE', 0.5)))
 
 WARN_BEFORE_KICK    = 10
@@ -4714,7 +4714,7 @@ DEFAULT_AI_SYSTEM_PROMPT = (
     'For moderate questions, answer with enough detail using short paragraphs or bullets. '
     'For complex questions, explain clearly with structure, examples, formulas, or code blocks when useful. '
     'Never pad answers. Never be shallow. '
-    'Keep the answer inside one Discord message. '
+    'Prefer complete answers over over-compressed summaries; the bot will fit long answers into one Discord message after generation. '
     'Use Discord markdown when helpful. '
     'If unsure, say so briefly.'
 )
@@ -4792,23 +4792,69 @@ def _configured_ai_provider_order() -> list[str]:
     return order
 
 
-def smart_cut_at_sentence(text: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
-    text = (text or '').strip()
-    if len(text) <= limit:
-        return text or '❌ AI không trả về nội dung.'
+AI_EMPTY_RESPONSE = '❌ AI không trả về nội dung.'
+AI_SAFE_TRIM_FALLBACK = 'Câu trả lời quá dài nên bot chưa thể thu gọn an toàn trong một tin nhắn Discord.'
+AI_TRUNCATION_WORDS = r'rút\s*gọn|rut\s*gon|shortened|truncated|trimmed|condensed|summari[sz]ed'
+AI_STANDALONE_TRUNCATION_MARKER_RE = re.compile(
+    rf'^[\s_*`~>-]*(?:\.{{3}}|…)?\s*(?:[\(\[]\s*)?(?:{AI_TRUNCATION_WORDS})(?:\s*[\)\]])?[\s_*`~.>-]*$',
+    re.IGNORECASE,
+)
+AI_TRAILING_TRUNCATION_MARKER_RE = re.compile(
+    rf'(?:\s*[_*`~>-]*(?:\.{{3}}|…)?\s*[\(\[]\s*(?:{AI_TRUNCATION_WORDS})\s*[\)\]][\s_*`~.>-]*)+$',
+    re.IGNORECASE,
+)
+AI_SENTENCE_BOUNDARY_RE = re.compile(r'[.!?。！？…]+(?:["\'”’)\]]+)?(?=\s|$)')
+AI_PARAGRAPH_BOUNDARY_RE = re.compile(r'\n\s*\n+')
+AI_LIST_LINE_BOUNDARY_RE = re.compile(r'\n(?=\s*(?:[-*+•]|\d+[.)])\s+)')
 
-    suffix = '\n\n_(rút gọn)_'
-    safe_limit = max(1, limit - len(suffix))
-    cut = text[:safe_limit]
-    sentence_ends = [
-        match.end()
-        for match in re.finditer(r'[.!?。！？](?=\s|$)', cut)
+
+def _strip_ai_truncation_markers(text: str) -> str:
+    cleaned = (text or '').strip()
+    if not cleaned:
+        return ''
+
+    cleaned = AI_TRAILING_TRUNCATION_MARKER_RE.sub('', cleaned).strip()
+    lines = [
+        line.rstrip()
+        for line in cleaned.splitlines()
+        if not AI_STANDALONE_TRUNCATION_MARKER_RE.match(line.strip())
     ]
-    if sentence_ends:
-        return cut[:sentence_ends[-1]].strip() + suffix
+    cleaned = '\n'.join(lines).strip()
+    return AI_TRAILING_TRUNCATION_MARKER_RE.sub('', cleaned).strip()
 
-    fallback = 'Câu trả lời quá dài nên bot chưa thể rút gọn an toàn trong một tin nhắn Discord.'
-    return fallback[:limit].strip()
+
+def _fallback_ai_trim_message(limit: int) -> str:
+    if len(AI_SAFE_TRIM_FALLBACK) <= limit:
+        return AI_SAFE_TRIM_FALLBACK
+    short_fallback = 'Câu trả lời quá dài.'
+    if len(short_fallback) <= limit:
+        return short_fallback
+    tiny_fallback = '❌'
+    if len(tiny_fallback) <= limit:
+        return tiny_fallback
+    return ''
+
+
+def smart_cut_at_sentence(text: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
+    if limit <= 0:
+        return ''
+
+    text = _strip_ai_truncation_markers(text)
+    if len(text) <= limit:
+        return text or AI_EMPTY_RESPONSE
+
+    cut = text[:limit]
+    boundary_positions: list[int] = []
+    boundary_positions.extend(match.start() for match in AI_PARAGRAPH_BOUNDARY_RE.finditer(cut))
+    boundary_positions.extend(match.end() for match in AI_SENTENCE_BOUNDARY_RE.finditer(cut))
+    boundary_positions.extend(match.start() for match in AI_LIST_LINE_BOUNDARY_RE.finditer(cut))
+
+    for boundary in sorted(set(boundary_positions), reverse=True):
+        candidate = _strip_ai_truncation_markers(cut[:boundary])
+        if candidate and len(candidate) <= limit:
+            return candidate
+
+    return _fallback_ai_trim_message(limit)
 
 
 def _openai_compatible_token_limit(provider: dict) -> dict:
@@ -5052,7 +5098,7 @@ async def _ask_ai_raw(question: str) -> str:
                 continue
             try:
                 answer = await _call_ai_provider(client, provider, question)
-                return answer.strip() or '❌ AI không trả về nội dung.'
+                return answer.strip() or AI_EMPTY_RESPONSE
             except AIProviderError as e:
                 errors.append(e)
                 if e.auth_failed:
@@ -5071,27 +5117,29 @@ async def _ask_ai_raw(question: str) -> str:
 
 async def _compact_ai_answer(question: str, answer: str, limit: int = AI_ONE_MESSAGE_LIMIT) -> str:
     compact_prompt = (
-        f'Rút gọn câu trả lời sau xuống tối đa {limit} ký tự. '
-        'Vẫn phải đủ ý chính, rõ ràng, dễ hiểu và nằm trong một tin nhắn Discord. '
-        'Không thêm mở bài. Không nói rằng bạn đang rút gọn. '
-        'Không lặp lại câu hỏi. Dùng tối đa 3-5 bullet points nếu cần.\n\n'
+        f'Viết lại câu trả lời sau để vừa tối đa {limit} ký tự trong một tin nhắn Discord. '
+        'Giữ câu trả lời hoàn chỉnh: kết luận, điều kiện, các bước chính, ví dụ hoặc cảnh báo quan trọng nếu có. '
+        'Chỉ cô đọng phần diễn đạt dư thừa; không biến câu trả lời phức tạp thành bản tóm tắt quá ngắn. '
+        'Nếu phải lược bớt, ưu tiên bỏ ví dụ phụ, câu chuyển ý và chi tiết lặp. '
+        'Không thêm mở bài. Không nói rằng câu trả lời đã được rút gọn, shortened, truncated hoặc trimmed. '
+        'Không lặp lại câu hỏi.\n\n'
         f'Câu hỏi: {question}\n\n'
-        f'Câu trả lời cần rút gọn:\n{answer}'
+        f'Câu trả lời cần viết lại:\n{answer}'
     )
     compacted = await _ask_ai_raw(compact_prompt)
-    return compacted.strip()
+    return _strip_ai_truncation_markers(compacted)
 
 
 async def _ask_ai(question: str) -> str:
-    answer = (await _ask_ai_raw(question)).strip()
+    answer = _strip_ai_truncation_markers(await _ask_ai_raw(question))
     if len(answer) <= AI_ONE_MESSAGE_LIMIT:
-        return answer or '❌ AI không trả về nội dung.'
+        return answer or AI_EMPTY_RESPONSE
 
     compacted = await _compact_ai_answer(question, answer, AI_ONE_MESSAGE_LIMIT)
-    if compacted.startswith('❌'):
+    if not compacted or compacted.startswith('❌'):
         return smart_cut_at_sentence(answer, AI_ONE_MESSAGE_LIMIT)
     if len(compacted) <= AI_ONE_MESSAGE_LIMIT:
-        return compacted or '❌ AI không trả về nội dung.'
+        return compacted
     return smart_cut_at_sentence(compacted, AI_ONE_MESSAGE_LIMIT)
 
 # ─── SLASH COMMANDS ──────────────────────────────────────────────────────────
