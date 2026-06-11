@@ -15,21 +15,11 @@ A comprehensive Discord bot developed in Python, designed to facilitate communit
 
 ## Runtime Architecture
 
-The bot now has three small core systems under `core/`:
+The bot starts from `bot.py`, uses `services/` for persistence, and loads a fixed set of Discord cogs from `plugins/`. Admin-only commands are protected by Discord administrator permission or the configured bot admin role.
 
-* `core/plugin_manager.py` loads, unloads, reloads, lists, and safely syncs Discord extension plugins from `plugins/`. A failed plugin is logged and recorded without crashing the bot.
-* `core/config_manager.py` stores per-guild key-value config in the database and bridges the older `guild_configs` table so existing setup data still works.
-* `core/acl.py` stores allow/deny ACL rules by user, role, channel, category, or guild default. Sensitive commands call `acl_check(...)` through the shared bot context.
+Available admin commands include `/admin setup`, `/admin setup_status`, `/admin db_status`, `/admin backup`, `/admin reset_all_data`, and `/admin coins add|remove|set`. Runtime plugin management, `/config`, and `/acl` commands are not registered.
 
-Plugins live under `plugins/`. Pomodoro, weekly reports, AI chat, and moderation are loaded as cogs now. Economy, loans, temporary rooms, notifications, leaderboard, and study voice tracking have plugin boundary files and remain compatible while their larger legacy implementations are migrated out of `bot.py` incrementally.
-
-New admin command groups:
-
-* `/bot plugins`, `/bot load`, `/bot unload`, `/bot reload`, `/bot reload_all`, `/bot status`
-* `/config get`, `/config set`, `/config list`, `/config delete`, `/config export`, `/config import`
-* `/acl list`, `/acl allow_user`, `/acl deny_user`, `/acl allow_role`, `/acl deny_role`, `/acl allow_channel`, `/acl deny_channel`, `/acl allow_guild`, `/acl deny_guild`, `/acl remove`, `/acl test`
-
-Destructive admin reset is available as `/admin reset_all_data` and requires the exact confirmation string `RESET <guild_id>`. It backs up the SQLite database first and resets only the current guild's study/economy/user data, leaving config, ACL rules, plugin settings, and role setup intact.
+Destructive admin reset is available as `/admin reset_all_data` and requires the exact confirmation string `RESET <guild_id>`. It backs up the SQLite database first and resets only the current guild's study/economy/user data, leaving server config and class-role setup intact.
 
 ## Deployment Guide (VPS / Docker)
 
