@@ -19,9 +19,6 @@ class TasklistCog(commands.Cog, name='TasklistCog'):
         if not interaction.guild:
             await interaction.response.send_message('Lệnh này chỉ dùng được trong server.', ephemeral=True)
             return False
-        if not await self.bot.study_context.acl_check(interaction, 'tasks.use'):
-            await interaction.response.send_message('ACL đang chặn bạn dùng tasklist.', ephemeral=True)
-            return False
         return True
 
     @tasks.command(name='add', description='Thêm task học tập')

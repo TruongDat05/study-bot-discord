@@ -28,14 +28,11 @@ from types import SimpleNamespace
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
 from pomodoro import PomodoroSession
-from core.acl import ACLManager
-from core.config_manager import ConfigManager, IMPORTANT_CONFIG_DEFAULTS
-from core.plugin_manager import PluginManager
 from services.database import DatabaseService
 from services.repositories import BotRepository
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -93,14 +90,14 @@ HUGGINGFACE_API_KEY = (
 
 GEMINI_FLASH_MODEL      = os.getenv('GEMINI_FLASH_MODEL', 'gemini-3.5-flash')
 GEMINI_FLASH_LITE_MODEL = os.getenv('GEMINI_FLASH_LITE_MODEL', 'gemini-3.1-flash-lite')
-GROQ_MODELS             = os.getenv('GROQ_MODELS', 'llama-3.3-70b-versatile,qwen/qwen3-32b')
+GROQ_MODELS             = os.getenv('GROQ_MODELS', 'llama-3.3-70b-versatile,llama-3.1-8b-instant')
 AI_PROVIDER_ORDER       = os.getenv('AI_PROVIDER_ORDER', 'groq,gemini,openrouter,huggingface')
-OPENROUTER_MODEL        = os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-20b:free')
-HUGGINGFACE_MODEL       = os.getenv('HUGGINGFACE_MODEL', 'deepseek-ai/DeepSeek-R1:fastest')
+OPENROUTER_MODEL        = os.getenv('OPENROUTER_MODEL', 'meta-llama/llama-3.3-70b-instruct:free')
+HUGGINGFACE_MODEL       = os.getenv('HUGGINGFACE_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3')
 AI_HTTP_TIMEOUT         = max(1.0, _env_float('AI_HTTP_TIMEOUT', 60.0))
-AI_ONE_MESSAGE_LIMIT    = max(1, min(2000, _env_int('AI_ONE_MESSAGE_LIMIT', 1750) or 1750))
-AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1400) or 1400)
-AI_TEMPERATURE          = max(0.0, min(2.0, _env_float('AI_TEMPERATURE', 0.6)))
+AI_ONE_MESSAGE_LIMIT    = max(1, min(2000, _env_int('AI_ONE_MESSAGE_LIMIT', 1900) or 1900))
+AI_MAX_OUTPUT_TOKENS    = max(1, _env_int('AI_MAX_OUTPUT_TOKENS', 1600) or 1600)
+AI_TEMPERATURE          = max(0.0, min(2.0, _env_float('AI_TEMPERATURE', 0.5)))
 
 WARN_BEFORE_KICK    = 10
 WAIT_SECONDS        = 60
@@ -201,6 +198,122 @@ database = DatabaseService(DATABASE_URL)
 repository = BotRepository(database, default_coins_per_minute=COINS_PER_MINUTE)
 _database_initialized = False
 _guild_context: contextvars.ContextVar[int | None] = contextvars.ContextVar('guild_id', default=None)
+
+CORE_CONFIG_KEYS = {
+    'create_room_channel_id',
+    'temp_room_category_id',
+    'report_channel_id',
+    'admin_role_id',
+    'coins_per_minute',
+    'focus_channel_ids',
+}
+
+CONFIG_DEFAULTS = {
+    'ai_enabled_channels': [],
+    'autoload_plugins': [],
+    'command_prefix': '!',
+    'notify_channel_mode': 'dm',
+    'reminder_delivery': 'dm',
+    'room_rent_coin_per_minute': 2,
+    'schedule_completion_bonus_coins': 10,
+    'timezone': os.getenv('TZ') or 'UTC',
+    'welcome_channel_id': None,
+}
+
+STARTUP_EXTENSIONS = [
+    'plugins.ai_chat',
+    'plugins.study_voice',
+    'plugins.pomodoro',
+    'plugins.weekly_report',
+    'plugins.moderation',
+    'plugins.notify',
+    'plugins.economy',
+    'plugins.loans',
+    'plugins.rooms',
+    'plugins.tasklist',
+    'plugins.schedule',
+    'plugins.reminders',
+    'plugins.leaderboard',
+]
+
+
+class GuildConfigManager:
+    """Tiny compatibility layer over repository config and guild_config_values."""
+
+    def __init__(self, repository: BotRepository):
+        self.repository = repository
+        self.defaults = CONFIG_DEFAULTS
+
+    def initialize(self):
+        self.repository.initialize()
+
+    @staticmethod
+    def _decode_value(raw: str | None, value_type: str, default=None):
+        if raw is None:
+            return default
+        try:
+            if value_type == 'json':
+                return json.loads(raw)
+            if value_type == 'int':
+                return int(raw)
+            if value_type == 'float':
+                return float(raw)
+            if value_type == 'bool':
+                return str(raw).lower() in {'1', 'true', 'yes', 'on'}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return default
+        return raw
+
+    @staticmethod
+    def _encode_value(value) -> tuple[str | None, str]:
+        if value is None:
+            return None, 'none'
+        if isinstance(value, bool):
+            return '1' if value else '0', 'bool'
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value), 'int'
+        if isinstance(value, float):
+            return str(value), 'float'
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, ensure_ascii=False, separators=(',', ':')), 'json'
+        return str(value), 'string'
+
+    def get(self, guild_id: int, key: str, default=None):
+        guild_id = int(guild_id)
+        fallback = self.defaults.get(key, default)
+        self.repository.initialize()
+        if key in CORE_CONFIG_KEYS:
+            return self.repository.get_guild_config(guild_id).get(key, fallback)
+        with database.read_connection() as conn:
+            row = conn.execute(
+                'SELECT value, type FROM guild_config_values WHERE guild_id = ? AND key = ?',
+                (guild_id, key),
+            ).fetchone()
+        if not row:
+            return fallback
+        return self._decode_value(row['value'], row['type'], fallback)
+
+    def set(self, guild_id: int, key: str, value, *, updated_by: int | None = None):
+        guild_id = int(guild_id)
+        self.repository.initialize()
+        if key in CORE_CONFIG_KEYS:
+            return self.repository.set_guild_config(guild_id, key, value)
+        raw, value_type = self._encode_value(value)
+        now = datetime.now().isoformat(timespec='seconds')
+        with database.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO guild_config_values (guild_id, key, value, type, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, key) DO UPDATE SET
+                    value = excluded.value,
+                    type = excluded.type,
+                    updated_by = excluded.updated_by,
+                    updated_at = excluded.updated_at
+                """,
+                (guild_id, key, raw, value_type, updated_by, now),
+            )
+        return value
 
 # ─── QUEST CONFIG ────────────────────────────────────────────────────────────
 
@@ -308,22 +421,16 @@ intents.members         = True
 intents.message_content = True
 
 def _command_prefix_resolver(client: commands.Bot, message: discord.Message):
-    if getattr(message, 'guild', None) and 'config_manager' in globals():
+    if getattr(message, 'guild', None):
         try:
-            return str(config_manager.get(message.guild.id, 'command_prefix') or '!')
+            return str(get_guild_config(message.guild.id).get('command_prefix') or '!')
         except Exception:
             log.warning('[Config] Failed to resolve command_prefix for %s', message.guild.id, exc_info=True)
     return '!'
 
 bot = commands.Bot(command_prefix=_command_prefix_resolver, intents=intents)
 
-config_manager = ConfigManager(
-    database,
-    legacy_repository=repository,
-    defaults={**IMPORTANT_CONFIG_DEFAULTS, 'coins_per_minute': COINS_PER_MINUTE},
-)
-acl_manager = ACLManager(database, bot=bot, config_manager=config_manager)
-plugin_manager = PluginManager(bot, config_manager=config_manager)
+config_manager = GuildConfigManager(repository)
 
 def _capture_guild_context(guild_id: int | None):
     if guild_id:
@@ -388,8 +495,6 @@ def initialize_database():
     if _database_initialized:
         return
     repository.initialize()
-    config_manager.initialize()
-    acl_manager.initialize()
     _database_initialized = True
 
 
@@ -2359,9 +2464,77 @@ def _draw_rounded_rect(draw, xy, radius, fill=None, outline=None, width=1):
     draw.rounded_rectangle(list(xy), radius=radius, fill=fill, outline=outline, width=width)
 
 
+def _lerp_channel(start: int, end: int, t: float) -> int:
+    return int(start + (end - start) * max(0.0, min(1.0, t)))
+
+
+def _lerp_rgba(start: tuple[int, int, int, int], end: tuple[int, int, int, int], t: float):
+    return tuple(_lerp_channel(start[i], end[i], t) for i in range(4))
+
+
+def _discord_dark_background(width: int, height: int):
+    img = Image.new('RGBA', (width, height), (14, 15, 20, 255))
+    draw = ImageDraw.Draw(img)
+    top = (17, 18, 24, 255)
+    bottom = (34, 36, 46, 255)
+    for y in range(height):
+        t = y / max(1, height - 1)
+        draw.line((0, y, width, y), fill=_lerp_rgba(top, bottom, t))
+
+    for x in range(0, width, 72):
+        draw.line((x, 0, x, height), fill=(255, 255, 255, 5), width=1)
+    for y in range(0, height, 72):
+        draw.line((0, y, width, y), fill=(255, 255, 255, 4), width=1)
+
+    accent = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    accent_draw = ImageDraw.Draw(accent)
+    accent_draw.polygon(
+        [(0, 0), (width, 0), (width, int(height * 0.22)), (0, int(height * 0.40))],
+        fill=(88, 101, 242, 34),
+    )
+    accent_draw.rectangle((0, 0, width, 5), fill=(88, 101, 242, 180))
+    img.alpha_composite(accent)
+    return img
+
+
+def _draw_soft_shadow(layer, xy, radius: int, alpha: int = 95, blur: int = 18, offset: tuple[int, int] = (0, 8)):
+    x1, y1, x2, y2 = [int(v) for v in xy]
+    dx, dy = offset
+    shadow = Image.new('RGBA', layer.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle(
+        (x1 + dx, y1 + dy, x2 + dx, y2 + dy),
+        radius=radius,
+        fill=(0, 0, 0, alpha),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
+    layer.alpha_composite(shadow)
+
+
+def _draw_discord_panel(
+    layer,
+    draw,
+    xy,
+    radius: int = 22,
+    fill=(43, 45, 49, 238),
+    outline=(78, 80, 88, 210),
+    width: int = 1,
+    shadow: bool = True,
+):
+    if shadow:
+        _draw_soft_shadow(layer, xy, radius)
+    draw.rounded_rectangle(list(xy), radius=radius, fill=fill, outline=outline, width=width)
+
+
 def _profile_card_text_width(draw, text: str, font) -> int:
     bbox = draw.textbbox((0, 0), str(text), font=font)
     return bbox[2] - bbox[0]
+
+
+def _draw_fitted_text(draw, xy, text: str, font, fill, max_width: int, anchor: str | None = None):
+    fitted = _fit_profile_card_text(draw, text, font, max_width)
+    draw.text(xy, fitted, font=font, fill=fill, anchor=anchor)
+    return fitted
 
 
 def _fit_profile_card_text(draw, text: str, font, max_width: int) -> str:
@@ -2457,6 +2630,76 @@ def _profile_card_resize_cover(img, size: tuple[int, int]):
     return resized.crop((left, top, left + target_w, top + target_h))
 
 
+def _load_remote_profile_image(avatar_url: str | None, timeout: float, max_bytes: int = 3_000_000):
+    if not avatar_url:
+        return None
+    url = str(avatar_url).strip()
+    if not url.lower().startswith(('https://', 'http://')):
+        return None
+
+    response = httpx.get(
+        url,
+        timeout=timeout,
+        follow_redirects=True,
+        headers={'User-Agent': 'discord-study-bot/1.0'},
+    )
+    response.raise_for_status()
+
+    content_type = response.headers.get('content-type', '').lower()
+    if content_type and not content_type.startswith('image/'):
+        raise ValueError(f'avatar response is not an image: {content_type}')
+
+    content_length = _as_int(response.headers.get('content-length'), 0)
+    if content_length > max_bytes:
+        raise ValueError('avatar image is too large')
+
+    content = response.content
+    if len(content) > max_bytes:
+        raise ValueError('avatar image is too large')
+
+    with Image.open(io.BytesIO(content)) as img:
+        if img.width > 4096 or img.height > 4096:
+            raise ValueError('avatar dimensions are too large')
+        img = ImageOps.exif_transpose(img)
+        return img.convert('RGB').copy()
+
+
+def _draw_gradient_progress_bar(
+    layer,
+    draw,
+    xy,
+    pct: float,
+    *,
+    background=(30, 31, 36, 255),
+    outline=(78, 80, 88, 210),
+    start=(88, 101, 242, 255),
+    end=(35, 165, 90, 255),
+):
+    x1, y1, x2, y2 = [int(v) for v in xy]
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    radius = max(1, height // 2)
+    pct = max(0.0, min(1.0, float(pct)))
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=background, outline=outline, width=1)
+
+    fill_w = int(width * pct)
+    if fill_w <= 0:
+        return
+
+    gradient = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    gradient_draw = ImageDraw.Draw(gradient)
+    for x in range(fill_w):
+        t = x / max(1, fill_w - 1)
+        gradient_draw.line((x, 0, x, height), fill=_lerp_rgba(start, end, t))
+
+    mask = Image.new('L', (width, height), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, fill_w, height), radius=radius, fill=255)
+    clip = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    clip.paste(gradient, (0, 0), mask)
+    layer.alpha_composite(clip, (x1, y1))
+
+
 def _profile_card_gradient_background(width: int, height: int):
     img = Image.new('RGB', (width, height), (10, 15, 28))
     draw = ImageDraw.Draw(img)
@@ -2495,27 +2738,42 @@ def _profile_card_background(width: int, height: int):
     return _profile_card_gradient_background(width, height)
 
 
-def _profile_card_avatar(avatar_url: str | None, display_name: str, size: int, timeout: float = 8.0):
+def _profile_card_avatar(
+    avatar_url: str | None,
+    display_name: str,
+    size: int,
+    timeout: float = 8.0,
+    corner_radius: int | None = None,
+):
     avatar = None
     if avatar_url:
         try:
-            response = httpx.get(avatar_url, timeout=timeout, follow_redirects=True)
-            response.raise_for_status()
-            avatar = Image.open(io.BytesIO(response.content)).convert('RGB')
-            avatar = _profile_card_resize_cover(avatar, (size, size))
+            loaded = _load_remote_profile_image(avatar_url, timeout)
+            if loaded is not None:
+                avatar = _profile_card_resize_cover(loaded, (size, size))
         except Exception as e:
             log.warning(f'Failed to download profile card avatar: {e}')
 
     if avatar is None:
-        avatar = Image.new('RGB', (size, size), (45, 55, 75))
+        avatar = Image.new('RGB', (size, size), (47, 49, 54))
         draw = ImageDraw.Draw(avatar)
+        for y in range(size):
+            t = y / max(1, size - 1)
+            draw.line(
+                (0, y, size, y),
+                fill=(
+                    _lerp_channel(88, 35, t),
+                    _lerp_channel(101, 165, t),
+                    _lerp_channel(242, 90, t),
+                ),
+            )
         initial = (display_name or '?').strip()[:1].upper() or '?'
-        font = _card_font(78, True)
-        draw.text((size // 2, size // 2 - 3), initial, font=font, fill=(226, 232, 240), anchor='mm')
+        font = _card_font(max(20, int(size * 0.46)), True)
+        draw.text((size // 2, size // 2 - 2), initial, font=font, fill=(255, 255, 255), anchor='mm')
 
     mask = Image.new('L', (size, size), 0)
     mask_draw = ImageDraw.Draw(mask)
-    mask_draw.rounded_rectangle((0, 0, size, size), radius=24, fill=255)
+    mask_draw.rounded_rectangle((0, 0, size, size), radius=corner_radius or size // 2, fill=255)
     out = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     out.paste(avatar.convert('RGBA'), (0, 0), mask)
     return out
@@ -2523,10 +2781,11 @@ def _profile_card_avatar(avatar_url: str | None, display_name: str, size: int, t
 
 def _draw_profile_card_stat(draw, box, label: str, value: str, color, label_font, value_font):
     x1, y1, x2, y2 = box
-    _draw_rounded_rect(draw, box, 16, fill=(15, 23, 42, 120), outline=(255, 255, 255, 24), width=1)
-    draw.text((x1 + 18, y1 + 10), label.upper(), font=label_font, fill=(148, 163, 184, 245))
-    fitted = _fit_profile_card_text(draw, value, value_font, max(1, x2 - x1 - 36))
-    draw.text((x1 + 18, y1 + 31), fitted, font=value_font, fill=color)
+    _draw_rounded_rect(draw, box, 18, fill=(43, 45, 49, 236), outline=(78, 80, 88, 210), width=1)
+    draw.rounded_rectangle((x1 + 13, y1 + 16, x1 + 18, y2 - 16), radius=3, fill=color)
+    draw.text((x1 + 30, y1 + 13), label.upper(), font=label_font, fill=(181, 186, 193, 245))
+    fitted = _fit_profile_card_text(draw, value, value_font, max(1, x2 - x1 - 44))
+    draw.text((x1 + 30, y1 + 35), fitted, font=value_font, fill=(242, 243, 245, 255))
 
 
 def generate_profile_card(
@@ -2571,87 +2830,105 @@ def generate_profile_card(
         coin_pct = max(0.0, min(1.0, (total_earned - coin_start) / max(1, coin_end - coin_start)))
 
     W, H = PROFILE_CARD_W, PROFILE_CARD_H
-    base = _profile_card_background(W, H).convert('RGBA')
-    base.alpha_composite(Image.new('RGBA', (W, H), (0, 0, 0, 80)))
+    base = _discord_dark_background(W, H)
     layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
 
-    TEXT = (248, 250, 252, 255)
-    MUTED = (203, 213, 225, 230)
-    SOFT = (148, 163, 184, 235)
-    CYAN = (103, 232, 249, 255)
-    BLUE = (96, 165, 250, 255)
-    GREEN = (74, 222, 128, 255)
-    GOLD = (251, 191, 36, 255)
-    PINK = (244, 114, 182, 255)
-    PURPLE = (167, 139, 250, 255)
+    TEXT = (242, 243, 245, 255)
+    MUTED = (181, 186, 193, 255)
+    SOFT = (148, 155, 164, 255)
+    PANEL = (43, 45, 49, 244)
+    PANEL_DARK = (30, 31, 36, 246)
+    BORDER = (78, 80, 88, 220)
+    BLURPLE = (88, 101, 242, 255)
+    GREEN = (35, 165, 90, 255)
+    YELLOW = (254, 231, 92, 255)
+    RED = (242, 63, 66, 255)
+    PINK = (235, 69, 158, 255)
+    CYAN = (88, 191, 255, 255)
 
-    f_name = _card_font(44, True)
-    f_sub = _card_font(22)
-    f_level = _card_font(88, True)
-    f_level_label = _card_font(16, True)
-    f_label = _card_font(13, True)
-    f_stat = _card_font(21, True)
-    f_about_title = _card_font(22, True)
-    f_about = _card_font(18)
+    f_name = _card_font(40, True)
+    f_sub = _card_font(20)
+    f_level = _card_font(62, True)
+    f_level_label = _card_font(13, True)
+    f_label = _card_font(12, True)
+    f_stat = _card_font(22, True)
+    f_about_title = _card_font(16, True)
+    f_about = _card_font(17)
     f_small = _card_font(16)
+    f_pill = _card_font(15, True)
 
-    _draw_rounded_rect(draw, (22, 22, W - 22, H - 22), 30, fill=(15, 23, 42, 150), outline=(255, 255, 255, 45), width=2)
-    _draw_rounded_rect(draw, (42, 40, W - 42, 300), 24, fill=(15, 23, 42, 118), outline=(255, 255, 255, 26), width=1)
-    _draw_rounded_rect(draw, (42, 318, W - 42, H - 40), 22, fill=(2, 6, 23, 116), outline=(255, 255, 255, 22), width=1)
+    _draw_discord_panel(layer, draw, (24, 22, W - 24, H - 22), 30, fill=PANEL_DARK, outline=BORDER, width=1)
+    draw.rounded_rectangle((24, 22, W - 24, 34), radius=6, fill=(88, 101, 242, 210))
+    _draw_discord_panel(layer, draw, (48, 50, W - 48, 226), 24, fill=PANEL, outline=BORDER, shadow=False)
+    _draw_discord_panel(layer, draw, (636, 72, 824, 202), 22, fill=PANEL_DARK, outline=BORDER, shadow=False)
 
-    avatar_size = 142
-    avatar_x, avatar_y = 66, 66
-    _draw_rounded_rect(draw, (avatar_x - 5, avatar_y - 5, avatar_x + avatar_size + 5, avatar_y + avatar_size + 5), 28, fill=(255, 255, 255, 34), outline=(255, 255, 255, 65), width=2)
+    avatar_size = 128
+    avatar_x, avatar_y = 78, 74
+    draw.ellipse(
+        (avatar_x - 7, avatar_y - 7, avatar_x + avatar_size + 7, avatar_y + avatar_size + 7),
+        fill=(88, 101, 242, 255),
+        outline=(130, 140, 255, 190),
+        width=2,
+    )
     layer.alpha_composite(_profile_card_avatar(avatar_url, name, avatar_size), (avatar_x, avatar_y))
+    draw.ellipse(
+        (avatar_x + avatar_size - 31, avatar_y + avatar_size - 31, avatar_x + avatar_size + 3, avatar_y + avatar_size + 3),
+        fill=PANEL,
+    )
+    draw.ellipse(
+        (avatar_x + avatar_size - 25, avatar_y + avatar_size - 25, avatar_x + avatar_size - 3, avatar_y + avatar_size - 3),
+        fill=GREEN,
+    )
 
-    display_name = _fit_profile_card_text(draw, name, f_name, 430)
-    draw.text((240, 72), display_name, font=f_name, fill=TEXT)
-    draw.text((242, 128), class_name, font=f_sub, fill=MUTED)
+    _draw_fitted_text(draw, (232, 72), name, f_name, TEXT, 370)
+    _draw_fitted_text(draw, (233, 124), class_name, f_sub, MUTED, 372)
 
-    rank_text = f'#{rank:,}' if rank else '-'
-    draw.text((242, 168), f'Rank {rank_text}', font=f_small, fill=SOFT)
-    draw.text((355, 168), f'Total earned {_profile_card_compact_number(total_earned)} coins', font=f_small, fill=SOFT)
+    rank_text = f'#{rank:,}' if rank else 'Unranked'
+    pill_y = 158
+    rank_pill = f'Rank {rank_text}'
+    rank_w = min(164, max(96, _profile_card_text_width(draw, rank_pill, f_pill) + 28))
+    draw.rounded_rectangle((232, pill_y, 232 + rank_w, pill_y + 30), radius=15, fill=(88, 101, 242, 52), outline=(88, 101, 242, 150), width=1)
+    _draw_fitted_text(draw, (246, pill_y + 15), rank_pill, f_pill, (214, 219, 255, 255), rank_w - 28, anchor='lm')
+    earned_pill = f'{_profile_card_compact_number(total_earned)} earned'
+    earned_x = 232 + rank_w + 10
+    earned_w = min(206, max(118, _profile_card_text_width(draw, earned_pill, f_pill) + 28))
+    draw.rounded_rectangle((earned_x, pill_y, earned_x + earned_w, pill_y + 30), radius=15, fill=(35, 165, 90, 45), outline=(35, 165, 90, 130), width=1)
+    _draw_fitted_text(draw, (earned_x + 14, pill_y + 15), earned_pill, f_pill, (196, 255, 214, 255), earned_w - 28, anchor='lm')
 
-    level_center_x, level_center_y = 146, 270
-    draw.text((level_center_x, level_center_y - 16), str(class_idx), font=f_level, fill=CYAN, anchor='mm')
-    draw.text((level_center_x, level_center_y + 48), 'CLASS LEVEL', font=f_level_label, fill=SOFT, anchor='mm')
+    progress_label = 'Max class reached' if coin_end == coin_start else f'{total_earned - coin_start:,} / {coin_end - coin_start:,} coins'
+    draw.text((232, 198), 'CLASS PROGRESS', font=f_label, fill=SOFT)
+    draw.text((612, 198), f'{int(coin_pct * 100)}%', font=f_label, fill=SOFT, anchor='ra')
+    _draw_gradient_progress_bar(
+        layer,
+        draw,
+        (232, 214, 612, 226),
+        coin_pct,
+        background=(30, 31, 36, 255),
+        outline=(78, 80, 88, 190),
+        start=BLURPLE,
+        end=GREEN,
+    )
+    _draw_fitted_text(draw, (232, 236), progress_label, f_small, SOFT, 380)
 
-    bar_x, bar_y, bar_w, bar_h = 240, 220, 590, 24
-    _draw_rounded_rect(draw, (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), bar_h // 2, fill=(15, 23, 42, 210), outline=(255, 255, 255, 34), width=1)
-    fill_w = int(bar_w * coin_pct)
-    if fill_w > 0:
-        progress_img = Image.new('RGBA', (bar_w, bar_h), (0, 0, 0, 0))
-        progress_draw = ImageDraw.Draw(progress_img)
-        for i in range(fill_w):
-            t = i / max(1, fill_w - 1)
-            r = int(BLUE[0] + (CYAN[0] - BLUE[0]) * t)
-            g = int(BLUE[1] + (CYAN[1] - BLUE[1]) * t)
-            b = int(BLUE[2] + (CYAN[2] - BLUE[2]) * t)
-            progress_draw.line((i, 0, i, bar_h), fill=(r, g, b, 255))
-        progress_mask = Image.new('L', (bar_w, bar_h), 0)
-        progress_mask_draw = ImageDraw.Draw(progress_mask)
-        progress_mask_draw.rounded_rectangle((0, 0, fill_w, bar_h), radius=bar_h // 2, fill=255)
-        progress_clip = Image.new('RGBA', (bar_w, bar_h), (0, 0, 0, 0))
-        progress_clip.paste(progress_img, (0, 0), progress_mask)
-        layer.alpha_composite(progress_clip, (bar_x, bar_y))
-    progress_text = 'Max class' if coin_end == coin_start else f'{total_earned - coin_start:,} / {coin_end - coin_start:,} coins'
-    draw.text((bar_x, bar_y + 36), progress_text, font=f_small, fill=SOFT)
-    draw.text((bar_x + bar_w, bar_y + 36), f'{int(coin_pct * 100)}%', font=f_small, fill=SOFT, anchor='ra')
+    draw.text((730, 94), 'CLASS', font=f_level_label, fill=SOFT, anchor='mm')
+    draw.text((730, 140), f'{class_idx:02d}', font=f_level, fill=TEXT, anchor='mm')
+    _draw_fitted_text(draw, (730, 183), CLASS_NAMES[class_idx], f_small, MUTED, 148, anchor='mm')
 
+    net_worth = balance - debt
     stats = [
-        ('Rank', rank_text, CYAN),
-        ('Balance', _profile_card_compact_number(balance), GOLD),
+        ('Balance', _profile_card_compact_number(balance), YELLOW),
         ('Total earned', _profile_card_compact_number(total_earned), GREEN),
-        ('Debt', _profile_card_compact_number(debt), PINK),
-        ('Streak', f'{streak} days', PURPLE),
-        ('Today study', format_time(today_secs), BLUE),
-        ('Earned today', _profile_card_compact_number(today_earned), GREEN),
+        ('Net worth', _profile_card_compact_number(net_worth), BLURPLE if net_worth >= 0 else RED),
+        ('Debt', _profile_card_compact_number(debt), RED if debt else SOFT),
+        ('Streak', f'{streak} days', PINK),
+        ('Today study', format_time(today_secs), CYAN),
         ('All time study', format_time(total), MUTED),
+        ('Earned today', _profile_card_compact_number(today_earned), GREEN),
     ]
-    stat_w, stat_h = 184, 62
-    start_x, start_y = 64, 332
-    gap_x, gap_y = 18, 12
+    stat_w, stat_h = 190, 76
+    start_x, start_y = 48, 252
+    gap_x, gap_y = 14, 14
     for index, (label, value, color) in enumerate(stats):
         col = index % 4
         row = index // 4
@@ -2665,11 +2942,12 @@ def generate_profile_card(
         or info.get('bio')
         or 'One percent better every day.'
     )
-    about_lines = _wrap_profile_card_text(draw, about, f_about, 572, 2)
-    about_x, about_y = 64, 488
-    draw.text((about_x, about_y), 'About me', font=f_about_title, fill=TEXT)
+    _draw_discord_panel(layer, draw, (48, 434, W - 48, 514), 20, fill=PANEL, outline=BORDER, shadow=False)
+    about_lines = _wrap_profile_card_text(draw, about, f_about, 654, 2)
+    about_x, about_y = 70, 456
+    draw.text((about_x, about_y), 'ABOUT', font=f_about_title, fill=SOFT)
     for i, line in enumerate(about_lines):
-        draw.text((about_x + 116, about_y + 2 + i * 23), line, font=f_about, fill=MUTED)
+        draw.text((about_x + 104, about_y - 1 + i * 23), line, font=f_about, fill=MUTED)
 
     final = Image.alpha_composite(base, layer)
     mask = Image.new('L', (W, H), 0)
@@ -2749,58 +3027,121 @@ def render_study_leaderboard_image(
     page: int,
     total_pages: int,
     today: str,
+    total_entries: int | None = None,
+    top_seconds: int | None = None,
 ) -> bytes:
     W, H = STUDY_LEADERBOARD_W, STUDY_LEADERBOARD_H
-    base = _profile_card_background(W, H).convert('RGBA')
-    base.alpha_composite(Image.new('RGBA', (W, H), (0, 0, 0, 120)))
+    base = _discord_dark_background(W, H)
     layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
 
-    f_title = _card_font(42, True)
+    total_entries = len(entries) if total_entries is None else max(0, int(total_entries))
+    top_seconds = max(top_seconds or 0, *(_as_int(entry.get('study_seconds', 0)) for entry in entries), 0)
+    page_seconds = sum(_as_int(entry.get('study_seconds', 0)) for entry in entries)
+
+    f_title = _card_font(40, True)
     f_sub = _card_font(18)
-    f_rank = _card_font(24, True)
-    f_name = _card_font(25, True)
-    f_time = _card_font(25, True)
-    f_empty = _card_font(26, True)
-    f_footer = _card_font(18)
+    f_rank = _card_font(22, True)
+    f_name = _card_font(23, True)
+    f_meta = _card_font(13, True)
+    f_time = _card_font(22, True)
+    f_empty = _card_font(24, True)
+    f_footer = _card_font(16)
+    f_summary_label = _card_font(12, True)
+    f_summary_value = _card_font(22, True)
 
-    TEXT = (248, 250, 252, 255)
-    MUTED = (203, 213, 225, 230)
-    SOFT = (148, 163, 184, 230)
-    GOLD = (250, 204, 21, 255)
-    CYAN = (103, 232, 249, 255)
+    TEXT = (242, 243, 245, 255)
+    MUTED = (181, 186, 193, 255)
+    SOFT = (148, 155, 164, 255)
+    PANEL = (43, 45, 49, 244)
+    PANEL_DARK = (30, 31, 36, 246)
+    BORDER = (78, 80, 88, 220)
+    BLURPLE = (88, 101, 242, 255)
+    GREEN = (35, 165, 90, 255)
+    GOLD = (254, 231, 92, 255)
+    SILVER = (181, 186, 193, 255)
+    BRONZE = (205, 127, 50, 255)
+    CYAN = (88, 191, 255, 255)
 
-    _draw_rounded_rect(draw, (28, 24, W - 28, H - 24), 30, fill=(6, 18, 30, 168), outline=(255, 255, 255, 36), width=2)
-    _draw_rounded_rect(draw, (52, 42, W - 52, 134), 24, fill=(6, 32, 46, 166), outline=(255, 255, 255, 26), width=1)
-    draw.text((W // 2, 78), 'STUDY TIME LEADERBOARD', anchor='mm', font=f_title, fill=GOLD)
-    draw.text((W // 2, 114), f'Today • {today}', anchor='mm', font=f_sub, fill=MUTED)
+    _draw_discord_panel(layer, draw, (24, 22, W - 24, H - 22), 30, fill=PANEL_DARK, outline=BORDER, width=1)
+    draw.rounded_rectangle((24, 22, W - 24, 34), radius=6, fill=(88, 101, 242, 210))
+    _draw_discord_panel(layer, draw, (48, 50, W - 48, 146), 24, fill=PANEL, outline=BORDER, shadow=False)
+    draw.text((72, 76), 'Study Leaderboard', font=f_title, fill=TEXT)
+    draw.text((74, 119), f'Today • {today}', font=f_sub, fill=MUTED)
+    draw.text((W - 74, 102), f'Page {page}/{total_pages}', anchor='rm', font=f_time, fill=GOLD)
+
+    summary_y = 166
+    summary_h = 58
+    summary_gap = 14
+    summary_w = (W - 96 - summary_gap * 2) // 3
+    summary_stats = [
+        ('MEMBERS', f'{total_entries:,}', BLURPLE),
+        ('TOP TIME', _study_leaderboard_time(top_seconds), GREEN),
+        ('THIS PAGE', _study_leaderboard_time(page_seconds), CYAN),
+    ]
+    for index, (label, value, color) in enumerate(summary_stats):
+        x1 = 48 + index * (summary_w + summary_gap)
+        x2 = x1 + summary_w
+        _draw_rounded_rect(draw, (x1, summary_y, x2, summary_y + summary_h), 18, fill=PANEL, outline=BORDER, width=1)
+        draw.rounded_rectangle((x1 + 14, summary_y + 14, x1 + 19, summary_y + summary_h - 14), radius=3, fill=color)
+        draw.text((x1 + 31, summary_y + 12), label, font=f_summary_label, fill=SOFT)
+        _draw_fitted_text(draw, (x1 + 31, summary_y + 33), value, f_summary_value, TEXT, summary_w - 48)
 
     if not entries:
-        _draw_rounded_rect(draw, (74, 180, W - 74, 290), 22, fill=(13, 45, 64, 150), outline=(255, 255, 255, 22), width=1)
-        draw.text((W // 2, 235), 'No study time recorded today', anchor='mm', font=f_empty, fill=MUTED)
+        _draw_discord_panel(layer, draw, (74, 270, W - 74, 382), 24, fill=PANEL, outline=BORDER, shadow=False)
+        draw.text((W // 2, 326), 'No study time recorded today', anchor='mm', font=f_empty, fill=MUTED)
     else:
-        start_y = 160
-        row_h = 62
-        gap = 14
+        start_y = 248
+        row_h = 58
+        gap = 10
+        row_x1, row_x2 = 52, W - 52
         for index, entry in enumerate(entries):
             y = start_y + index * (row_h + gap)
-            _draw_rounded_rect(draw, (58, y, W - 58, y + row_h), 19, fill=(13, 45, 64, 162), outline=(255, 255, 255, 24), width=1)
+            rank_num = _as_int(entry.get('rank', index + 1), index + 1)
+            rank_color = {1: GOLD, 2: SILVER, 3: BRONZE}.get(rank_num, CYAN)
+            row_fill = (47, 49, 54, 244) if rank_num > 3 else (55, 52, 42, 246)
+            _draw_rounded_rect(draw, (row_x1, y, row_x2, y + row_h), 18, fill=row_fill, outline=BORDER, width=1)
+            draw.rounded_rectangle((row_x1, y, row_x1 + 7, y + row_h), radius=4, fill=rank_color)
+
+            rank_text = f'#{rank_num:,}'
+            _draw_fitted_text(draw, (90, y + row_h // 2), rank_text, f_rank, rank_color, 66, anchor='mm')
 
             avatar = _profile_card_avatar(entry.get('avatar_url'), entry.get('display_name', ''), 44, timeout=2.5)
-            layer.alpha_composite(avatar, (78, y + 9))
+            layer.alpha_composite(avatar, (126, y + 7))
 
-            rank = f'#{entry.get("rank", 0)}'
-            name = _fit_profile_card_text(draw, entry.get('display_name', 'Unknown'), f_name, 430)
+            seconds = _as_int(entry.get('study_seconds', 0))
             time_text = _study_leaderboard_time(entry.get('study_seconds', 0))
-            rank_color = GOLD if entry.get('rank') in (1, 2, 3) else CYAN
-            draw.text((150, y + row_h // 2), rank, anchor='lm', font=f_rank, fill=rank_color)
-            draw.text((225, y + row_h // 2), name, anchor='lm', font=f_name, fill=TEXT)
-            draw.text((790, y + row_h // 2), time_text, anchor='rm', font=f_time, fill=TEXT)
+            time_w = min(182, max(112, _profile_card_text_width(draw, time_text, f_time) + 34))
+            time_x2 = row_x2 - 24
+            time_x1 = time_x2 - time_w
+            name_x = 190
+            name_max = max(120, time_x1 - name_x - 22)
+            _draw_fitted_text(draw, (name_x, y + 15), entry.get('display_name', 'Unknown'), f_name, TEXT, name_max)
+            draw.text((name_x, y + 40), 'TODAY STUDY', font=f_meta, fill=SOFT)
+            progress_x1 = name_x + 104
+            progress_x2 = max(progress_x1 + 40, time_x1 - 24)
+            _draw_gradient_progress_bar(
+                layer,
+                draw,
+                (progress_x1, y + 45, progress_x2, y + 51),
+                seconds / max(1, top_seconds),
+                background=(30, 31, 36, 255),
+                outline=(30, 31, 36, 255),
+                start=BLURPLE,
+                end=GREEN,
+            )
+            draw.rounded_rectangle((time_x1, y + 14, time_x2, y + 44), radius=15, fill=(35, 165, 90, 44), outline=(35, 165, 90, 150), width=1)
+            _draw_fitted_text(draw, ((time_x1 + time_x2) // 2, y + 29), time_text, f_time, TEXT, time_w - 22, anchor='mm')
 
-    draw.text((W // 2, H - 44), f'Page {page}/{total_pages}', anchor='mm', font=f_footer, fill=SOFT)
+    draw.text((W // 2, H - 44), 'Live sessions are included in today\'s totals', anchor='mm', font=f_footer, fill=SOFT)
     final = Image.alpha_composite(base, layer)
+    mask = Image.new('L', (W, H), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle((0, 0, W, H), radius=34, fill=255)
+    out = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    out.paste(final, (0, 0), mask)
     buf = io.BytesIO()
-    final.save(buf, format='PNG', optimize=True)
+    out.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return buf.getvalue()
 
@@ -2826,6 +3167,8 @@ class StudyLeaderboardView(discord.ui.View):
             self.page,
             self.total_pages,
             self.today,
+            len(self.entries),
+            self.entries[0].get('study_seconds', 0) if self.entries else 0,
         )
         return discord.File(io.BytesIO(image), filename=f'study_leaderboard_{self.page}.png')
 
@@ -4363,18 +4706,26 @@ async def _sync_member_progress(member: discord.Member, previous_level: int | No
 
 # ─── AI ──────────────────────────────────────────────────────────────────────
 
-AI_SYSTEM_PROMPT = (
-    'Bạn là một trợ lý AI đa năng trong Discord. '
-    'Bạn có thể trả lời mọi chủ đề bình thường như học tập, lập trình, toán, ngôn ngữ, đời sống, giải thích khái niệm, tóm tắt, viết lại nội dung, gợi ý ý tưởng và hội thoại thường ngày. '
-    'Trả lời tự nhiên, hữu ích, rõ ràng và đủ ý. '
-    'Không giới hạn bản thân chỉ trong chủ đề học tập. '
-    'Nếu câu hỏi đơn giản, trả lời trực tiếp và ngắn gọn. '
-    'Nếu câu hỏi phức tạp, hãy giải thích có cấu trúc, nêu ý chính, ví dụ ngắn nếu cần, rồi kết luận. '
-    'Không mở bài dài, không lặp lại câu hỏi, không trả lời sơ sài. '
-    'Luôn cố gắng giữ câu trả lời trong một tin nhắn Discord.'
+DEFAULT_AI_SYSTEM_PROMPT = (
+    'You are a smart, direct general-purpose AI assistant inside a Discord server. '
+    'Reply in the same language as the user. '
+    'Answer any normal topic honestly and helpfully. '
+    'For simple questions, answer in 1-3 sentences. '
+    'For moderate questions, answer with enough detail using short paragraphs or bullets. '
+    'For complex questions, explain clearly with structure, examples, formulas, or code blocks when useful. '
+    'Never pad answers. Never be shallow. '
+    'Keep the answer inside one Discord message. '
+    'Use Discord markdown when helpful. '
+    'If unsure, say so briefly.'
 )
-AI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+AI_SYSTEM_PROMPT = os.getenv('AI_SYSTEM_PROMPT') or DEFAULT_AI_SYSTEM_PROMPT
+AI_RETRYABLE_STATUS_CODES = {404, 429, 500, 502, 503, 504}
 AI_RETRYABLE_ERROR_PATTERNS = (
+    'model not found',
+    'not_found',
+    'does not exist',
+    'invalid model',
+    'invalid_model',
     'quota',
     'rate limit',
     'rate_limit',
@@ -4556,7 +4907,7 @@ async def _post_ai_json(client: httpx.AsyncClient, provider: str, url: str, head
     try:
         return response.json()
     except ValueError as e:
-        raise AIProviderError(provider, 'Phản hồi AI không phải JSON hợp lệ.') from e
+        raise AIProviderError(provider, 'Phản hồi AI không phải JSON hợp lệ.', retryable=True) from e
 
 
 def _extract_gemini_text(provider: str, payload: dict) -> str:
@@ -4571,13 +4922,13 @@ def _extract_gemini_text(provider: str, payload: dict) -> str:
     block_reason = payload.get('promptFeedback', {}).get('blockReason')
     if block_reason:
         raise AIProviderError(provider, f'Gemini chặn phản hồi: {block_reason}')
-    raise AIProviderError(provider, 'Gemini không trả về nội dung văn bản.')
+    raise AIProviderError(provider, 'Gemini không trả về nội dung văn bản.', retryable=True)
 
 
 def _extract_openai_compatible_text(provider: str, payload: dict) -> str:
     choices = payload.get('choices') or []
     if not choices:
-        raise AIProviderError(provider, 'Provider không trả về lựa chọn phản hồi.')
+        raise AIProviderError(provider, 'Provider không trả về lựa chọn phản hồi.', retryable=True)
 
     message = choices[0].get('message') or {}
     content = message.get('content', choices[0].get('text', ''))
@@ -4592,7 +4943,7 @@ def _extract_openai_compatible_text(provider: str, payload: dict) -> str:
         text = str(content).strip() if content else ''
 
     if not text:
-        raise AIProviderError(provider, 'Provider trả về phản hồi rỗng.')
+        raise AIProviderError(provider, 'Provider trả về phản hồi rỗng.', retryable=True)
     return text
 
 
@@ -4611,7 +4962,7 @@ def _extract_huggingface_text_generation_text(provider: str, payload) -> str:
 
     text = text.strip()
     if not text:
-        raise AIProviderError(provider, 'Hugging Face trả về phản hồi rỗng.')
+        raise AIProviderError(provider, 'Hugging Face trả về phản hồi rỗng.', retryable=True)
     return text
 
 
@@ -4955,7 +5306,7 @@ async def slash_card(interaction: discord.Interaction, member: discord.Member = 
         await interaction.followup.send(
             '❌ Tính năng `/card` cần **Pillow**: `pip install Pillow`', ephemeral=True
         ); return
-    avatar_url = str(target.display_avatar.with_size(256).url) if getattr(target, 'display_avatar', None) else None
+    avatar_url = _member_avatar_url(target, 256)
     card_bytes = await asyncio.to_thread(
         generate_profile_card,
         target.id,
@@ -5885,13 +6236,6 @@ async def _send_room_control_error(interaction: discord.Interaction, message: st
         await interaction.response.send_message(message, ephemeral=True)
 
 
-async def _require_room_acl(interaction: discord.Interaction, action_name: str) -> bool:
-    if await acl_check(interaction, action_name):
-        return True
-    await _send_room_control_error(interaction, '❌ ACL đang chặn thao tác phòng này.')
-    return False
-
-
 class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
     room_name = discord.ui.TextInput(
         label='Tên phòng mới',
@@ -5906,9 +6250,6 @@ class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể đổi tên phòng.')
             return
-        if not await _require_room_acl(interaction, 'room.rename'):
-            return
-
         new_name = ' '.join(str(self.room_name.value).split()).strip()
         if not new_name:
             await interaction.response.send_message('❌ Tên phòng không hợp lệ.', ephemeral=True)
@@ -6266,8 +6607,6 @@ class RoomControlView(discord.ui.View):
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể khóa phòng.')
             return
-        if not await _require_room_acl(interaction, 'room.lock'):
-            return
         await interaction.response.defer(ephemeral=True)
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.connect = False
@@ -6289,8 +6628,6 @@ class RoomControlView(discord.ui.View):
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể mở phòng.')
-            return
-        if not await _require_room_acl(interaction, 'room.unlock'):
             return
         await interaction.response.defer(ephemeral=True)
         overwrite = channel.overwrites_for(interaction.guild.default_role)
@@ -6314,8 +6651,6 @@ class RoomControlView(discord.ui.View):
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể đổi tên phòng.')
             return
-        if not await _require_room_acl(interaction, 'room.rename'):
-            return
         await interaction.response.send_modal(RoomRenameModal())
 
     @discord.ui.button(label='Xóa', emoji='🗑️', style=discord.ButtonStyle.danger, row=0, custom_id='room_delete')
@@ -6323,8 +6658,6 @@ class RoomControlView(discord.ui.View):
         channel, error = _resolve_room_control_channel(interaction)
         if error or channel is None:
             await _send_room_control_error(interaction, error or '❌ Không thể xóa phòng.')
-            return
-        if not await _require_room_acl(interaction, 'room.delete'):
             return
         room_name = channel.name
         await interaction.response.defer(ephemeral=True)
@@ -6394,9 +6727,6 @@ class RoomPanelView(discord.ui.View):
 
 @bot.tree.command(name='room_panel', description='Tạo bảng điều khiển phòng học')
 async def slash_room_panel(interaction: discord.Interaction):
-    if not await acl_check(interaction, 'room.panel'):
-        await _send_interaction_denial(interaction, 'ACL đang chặn bạn dùng bảng điều khiển phòng.')
-        return
     embed = discord.Embed(
         title='Chào mừng đến với phòng học',
         description=(
@@ -6676,8 +7006,8 @@ def is_bot_admin(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
 
-    config = get_guild_config(member.guild.id)
-    admin_role_id = config.get('admin_role_id')
+    config = repository.get_guild_config(member.guild.id)
+    admin_role_id = config.get('admin_role_id') if config else None
     if admin_role_id:
         return any(role.id == int(admin_role_id) for role in member.roles)
 
@@ -6688,15 +7018,8 @@ def _admin_role_allowed(interaction: discord.Interaction) -> bool:
     return isinstance(interaction.user, discord.Member) and is_bot_admin(interaction.user)
 
 
-async def acl_check(interaction_or_message, action_name: str) -> bool:
-    """Shared ACL helper used by bot.py commands and plugin cogs."""
-    return await acl_manager.check(interaction_or_message, action_name)
-
-
 async def _is_admin_actor(interaction_or_message) -> bool:
     user = getattr(interaction_or_message, 'user', None) or getattr(interaction_or_message, 'author', None)
-    if await acl_manager.is_owner(user):
-        return True
     return isinstance(user, discord.Member) and is_bot_admin(user)
 
 
@@ -6711,9 +7034,7 @@ async def _require_admin(interaction: discord.Interaction, action_name: str = 'a
     if not interaction.guild:
         await _send_interaction_denial(interaction, 'Lệnh này chỉ dùng được trong server.')
         return False
-    if await acl_manager.is_owner(interaction.user) or (
-        isinstance(interaction.user, discord.Member) and is_bot_admin(interaction.user)
-    ):
+    if isinstance(interaction.user, discord.Member) and is_bot_admin(interaction.user):
         return True
     await _send_interaction_denial(interaction, 'Bạn không có quyền dùng lệnh này.')
     return False
@@ -6724,13 +7045,7 @@ async def _require_moderator(interaction: discord.Interaction, action_name: str 
         await _send_interaction_denial(interaction, 'Lệnh này chỉ dùng được trong server.')
         return False
     member = interaction.user if isinstance(interaction.user, discord.Member) else None
-    perms = getattr(member, 'guild_permissions', None)
-    allowed = (
-        await acl_manager.is_owner(interaction.user)
-        or bool(member and is_bot_admin(member))
-        or bool(perms and (perms.moderate_members or perms.manage_messages))
-    )
-    if not allowed:
+    if not (member and is_bot_admin(member)):
         await _send_interaction_denial(interaction, 'Bạn không có quyền dùng lệnh này.')
         return False
     return True
@@ -7056,7 +7371,7 @@ async def admin_reset_all_data(interaction: discord.Interaction, confirm: str):
         f'Đã reset study/economy data cho **{guild.name}**.\n'
         f'Backup trước reset: `{backup_path}`\n'
         f'Runtime sessions cleared: `{cleared_runtime}`\n'
-        'Config, ACL rules, plugin settings, and class-role setup were kept.',
+        'Server config and class-role setup were kept.',
         ephemeral=True,
     )
 
@@ -7298,10 +7613,8 @@ def _install_study_context():
         database=database,
         repository=repository,
         config_manager=config_manager,
-        acl_manager=acl_manager,
-        plugin_manager=plugin_manager,
-        acl_check=acl_check,
         is_admin_actor=_is_admin_actor,
+        is_bot_admin=is_bot_admin,
         require_admin=_require_admin,
         require_moderator=_require_moderator,
         ask_ai=_ask_ai,
@@ -7328,6 +7641,30 @@ async def _ensure_core_cogs_loaded():
         bot.tree.remove_command(command_name)
     _core_cogs_ready = True
 
+
+async def _load_startup_extensions():
+    for extension in STARTUP_EXTENSIONS:
+        if extension in bot.extensions:
+            continue
+        try:
+            await bot.load_extension(extension)
+            log.info('[Startup] Extension %s loaded.', extension)
+        except commands.ExtensionAlreadyLoaded:
+            log.info('[Startup] Extension %s already loaded.', extension)
+        except Exception as e:
+            log.error('[Startup] Extension %s failed: %s', extension, e, exc_info=True)
+
+
+async def _sync_app_commands(*, reason: str = 'startup'):
+    for guild in bot.guilds:
+        try:
+            bot.tree.clear_commands(guild=guild)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            log.info('[CommandSync] Synced %s commands for %s (%s).', len(synced), guild.name, reason)
+        except Exception as e:
+            log.error('[CommandSync] Failed for %s: %s', guild.name, e, exc_info=True)
+
 @bot.event
 async def on_message(message: discord.Message):
     if not message.author.bot:
@@ -7350,17 +7687,12 @@ async def on_ready():
             bot.add_view(RoomPanelView())
             _room_panel_view_registered = True
 
-        results = await plugin_manager.load_autoloaded(sync=False)
-        for plugin_name, ok, message in results:
-            if ok:
-                log.info('[Startup] Plugin %s ready: %s', plugin_name, message)
-            else:
-                log.error('[Startup] Plugin %s failed: %s', plugin_name, message)
+        await _load_startup_extensions()
         _startup_extensions_ready = True
     else:
         log.info('[Startup] Extension setup already completed; skipping.')
 
-    await plugin_manager.sync_commands(reason='startup')
+    await _sync_app_commands(reason='startup')
 
     guild_class_role_ids: dict[int, dict[int, int]] = {}
     for guild in bot.guilds:

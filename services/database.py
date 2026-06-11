@@ -171,6 +171,7 @@ class DatabaseService:
                 'runtime_sessions', 'runtime_snapshots',
                 'guild_config_values', 'acl_rules', 'tasks', 'private_rooms',
                 'scheduled_sessions', 'reminders', 'achievements',
+                'short_term_chat_memory',
             ):
                 counts[table] = conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
         return {
@@ -470,4 +471,27 @@ ON acl_rules (guild_id, action, enabled, priority);
 
 CREATE INDEX IF NOT EXISTS idx_acl_rules_subjects
 ON acl_rules (guild_id, user_id, role_id, channel_id, category_id);
+
+CREATE TABLE IF NOT EXISTS short_term_chat_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER,
+    user_id INTEGER,
+    author_name TEXT NOT NULL,
+    author_is_bot INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_short_term_chat_memory_channel
+ON short_term_chat_memory (guild_id, channel_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_short_term_chat_memory_user
+ON short_term_chat_memory (guild_id, channel_id, user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_short_term_chat_memory_message
+ON short_term_chat_memory (guild_id, channel_id, message_id)
+WHERE message_id IS NOT NULL;
 """

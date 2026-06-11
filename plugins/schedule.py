@@ -74,9 +74,6 @@ class ScheduleCog(commands.Cog, name='ScheduleCog'):
         if not interaction.guild:
             await interaction.response.send_message('Lệnh này chỉ dùng được trong server.', ephemeral=True)
             return False
-        if not await self.bot.study_context.acl_check(interaction, 'schedule.use'):
-            await interaction.response.send_message('ACL đang chặn bạn dùng schedule.', ephemeral=True)
-            return False
         return True
 
     @schedule.command(name='book', description='Book một phiên học có trách nhiệm')

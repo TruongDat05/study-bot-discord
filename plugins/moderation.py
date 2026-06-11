@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 
 class ModerationPlugin(commands.Cog, name='ModerationPlugin'):
-    """Basic moderation commands guarded by ACL.
+    """Basic moderation commands guarded by the bot admin check.
 
     These commands are intentionally small: they provide warn/timeout controls
     without touching the study/economy data model.

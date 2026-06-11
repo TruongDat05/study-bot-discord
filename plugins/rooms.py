@@ -28,9 +28,6 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
         if not interaction.guild:
             await interaction.response.send_message('Lệnh này chỉ dùng được trong server.', ephemeral=True)
             return False
-        if not await self.bot.study_context.acl_check(interaction, action):
-            await interaction.response.send_message('ACL đang chặn bạn dùng room.', ephemeral=True)
-            return False
         return True
 
     async def _can_control(self, interaction: discord.Interaction, room: dict, action: str) -> bool:

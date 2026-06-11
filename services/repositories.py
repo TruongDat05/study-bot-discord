@@ -404,6 +404,137 @@ class BotRepository:
     def _row_dict(row) -> dict:
         return dict(row) if row else {}
 
+    @staticmethod
+    def _positive_limit(limit: int, default: int = 30) -> int:
+        try:
+            value = int(limit)
+        except (TypeError, ValueError):
+            value = default
+        return max(1, value)
+
+    def add_chat_memory_message(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        content: str,
+        user_id: int | None = None,
+        author_name: str = 'Unknown',
+        author_is_bot: bool = False,
+        source: str = 'normal',
+        message_id: int | None = None,
+        created_at: str | None = None,
+        limit: int = 30,
+    ) -> bool:
+        content = str(content or '').strip()
+        if not content:
+            return False
+        limit = self._positive_limit(limit)
+        now = created_at or _now()
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO short_term_chat_memory (
+                    guild_id, channel_id, message_id, user_id, author_name,
+                    author_is_bot, source, content, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(guild_id),
+                    int(channel_id),
+                    int(message_id) if message_id is not None else None,
+                    int(user_id) if user_id is not None else None,
+                    str(author_name or 'Unknown')[:120],
+                    1 if author_is_bot else 0,
+                    str(source or 'normal')[:40],
+                    content,
+                    str(now),
+                ),
+            )
+            self._prune_chat_memory_conn(conn, guild_id, channel_id, limit)
+            return cur.rowcount > 0
+
+    def _prune_chat_memory_conn(self, conn, guild_id: int, channel_id: int, limit: int) -> int:
+        limit = self._positive_limit(limit)
+        cur = conn.execute(
+            """
+            DELETE FROM short_term_chat_memory
+            WHERE guild_id = ? AND channel_id = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM short_term_chat_memory
+                  WHERE guild_id = ? AND channel_id = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+              )
+            """,
+            (int(guild_id), int(channel_id), int(guild_id), int(channel_id), limit),
+        )
+        return int(cur.rowcount or 0)
+
+    def list_chat_memory(self, guild_id: int, channel_id: int, *, limit: int = 30) -> list[dict]:
+        limit = self._positive_limit(limit)
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM short_term_chat_memory
+                WHERE guild_id = ? AND channel_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(guild_id), int(channel_id), limit),
+            ).fetchall()
+        return [self._row_dict(row) for row in reversed(rows)]
+
+    def chat_memory_stats(self, guild_id: int, channel_id: int) -> dict:
+        with self.db.read_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id END) AS unique_users,
+                    SUM(CASE WHEN author_is_bot = 1 THEN 1 ELSE 0 END) AS bot_messages,
+                    SUM(CASE WHEN author_is_bot = 0 THEN 1 ELSE 0 END) AS user_messages,
+                    MIN(created_at) AS oldest_at,
+                    MAX(created_at) AS newest_at
+                FROM short_term_chat_memory
+                WHERE guild_id = ? AND channel_id = ?
+                """,
+                (int(guild_id), int(channel_id)),
+            ).fetchone()
+        stats = self._row_dict(row)
+        return {
+            'total': _as_int(stats.get('total'), 0),
+            'unique_users': _as_int(stats.get('unique_users'), 0),
+            'bot_messages': _as_int(stats.get('bot_messages'), 0),
+            'user_messages': _as_int(stats.get('user_messages'), 0),
+            'oldest_at': stats.get('oldest_at'),
+            'newest_at': stats.get('newest_at'),
+        }
+
+    def clear_chat_memory_for_user(self, guild_id: int, channel_id: int, user_id: int) -> int:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM short_term_chat_memory
+                WHERE guild_id = ? AND channel_id = ? AND user_id = ?
+                """,
+                (int(guild_id), int(channel_id), int(user_id)),
+            )
+            return int(cur.rowcount or 0)
+
+    def clear_chat_memory_for_channel(self, guild_id: int, channel_id: int) -> int:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM short_term_chat_memory
+                WHERE guild_id = ? AND channel_id = ?
+                """,
+                (int(guild_id), int(channel_id)),
+            )
+            return int(cur.rowcount or 0)
+
     def _minimal_profile(self, display_name: str) -> dict:
         return {
             'name': str(display_name or 'Unknown'),
