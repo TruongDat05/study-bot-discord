@@ -110,14 +110,42 @@ class PluginManager:
         discovered = set(self.discover())
         return [name for name in dict.fromkeys(names) if name in discovered]
 
+    def _restore_guild_commands(self, guild: discord.Guild, commands: list) -> None:
+        self.bot.tree.clear_commands(guild=guild)
+        for command in commands:
+            self.bot.tree.add_command(command, guild=guild, override=True)
+
+    def _prepare_guild_commands_for_sync(self, guild: discord.Guild, *, reason: str) -> bool:
+        previous_commands = list(self.bot.tree.get_commands(guild=guild))
+        try:
+            self.bot.tree.clear_commands(guild=guild)
+            self.bot.tree.copy_global_to(guild=guild)
+        except Exception:
+            log.error('[Plugin] Could not prepare commands for %s after %s', guild.name, reason, exc_info=True)
+            try:
+                self._restore_guild_commands(guild, previous_commands)
+            except Exception:
+                log.error('[Plugin] Could not restore previous commands for %s', guild.name, exc_info=True)
+            return False
+
+        if not self.bot.tree.get_commands(guild=guild):
+            log.error('[Plugin] Refusing to sync zero commands to %s after %s', guild.name, reason)
+            try:
+                self._restore_guild_commands(guild, previous_commands)
+            except Exception:
+                log.error('[Plugin] Could not restore previous commands for %s', guild.name, exc_info=True)
+            return False
+
+        return True
+
     async def sync_commands(self, *, reason: str = 'plugin change') -> dict[int, int]:
         """Synchronize slash commands with a lock to avoid overlapping syncs."""
         results: dict[int, int] = {}
         async with self._sync_lock:
             for guild in self.bot.guilds:
+                if not self._prepare_guild_commands_for_sync(guild, reason=reason):
+                    continue
                 try:
-                    self.bot.tree.clear_commands(guild=guild)
-                    self.bot.tree.copy_global_to(guild=guild)
                     synced = await self.bot.tree.sync(guild=guild)
                     results[guild.id] = len(synced)
                     log.info('[Plugin] Synced %s commands to %s after %s', len(synced), guild.name, reason)

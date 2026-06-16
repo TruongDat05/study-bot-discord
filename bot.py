@@ -167,20 +167,6 @@ CLASS_NAMES      = [
 LEVEL_THRESHOLDS = CLASS_THRESHOLDS
 LEVEL_NAMES = CLASS_NAMES
 
-LEVEL_ROLES: dict[int, int | None] = {
-    0:  None,
-    1:  1493178947436019832,   # Học Sinh
-    2:  1493179256556224612,   # Chăm Chỉ
-    3:  1493179380497907763,   # Tập Trung
-    4:  1493179493836132423,   # Xuất Sắc
-    5:  1493179683804545084,   # Tinh Anh
-    6:  1493179767376318504,   # Huyền Thoại
-    7:  1493180760612409446,   # Bậc Thầy
-    8:  1493179837261811822,   # Thiên Tài
-    9:  1493180024818372759,   # Vô Địch
-    10: 1493180158562275390,   # Thần Học
-}
-
 CLASS_ROLE_NAMES: dict[int, str] = {
     1: 'Class 1 Newbie',
     2: 'Class 2 Student',
@@ -3385,12 +3371,6 @@ def _find_class_role_by_level(guild: discord.Guild, level: int) -> discord.Role 
         if role:
             return role
 
-    legacy_id = LEVEL_ROLES.get(level)
-    if legacy_id:
-        role = guild.get_role(legacy_id)
-        if role:
-            return role
-
     return None
 
 
@@ -3401,9 +3381,6 @@ def _known_class_role_ids(guild: discord.Guild, role_ids: dict[int, int] | None 
         role = discord.utils.get(guild.roles, name=CLASS_ROLE_NAMES[level])
         if role:
             ids.add(role.id)
-        legacy_id = LEVEL_ROLES.get(level)
-        if legacy_id and guild.get_role(legacy_id):
-            ids.add(legacy_id)
     return ids
 
 
@@ -3505,12 +3482,17 @@ async def _ensure_role_synced(
         if not role_ids:
             return
 
-        if current_level in CLASS_ROLE_NAMES and current_level not in role_ids:
-            log.error(f'[RoleSync] No class role available for class {current_level} in {guild.name}')
-            return
-
         expected_role_id = role_ids.get(current_level)
         expected_role = guild.get_role(expected_role_id) if expected_role_id else None
+
+        if current_level in CLASS_ROLE_NAMES and (not expected_role_id or not expected_role):
+            role_ids = await ensure_class_roles(guild)
+            expected_role_id = role_ids.get(current_level)
+            expected_role = guild.get_role(expected_role_id) if expected_role_id else None
+
+        if current_level in CLASS_ROLE_NAMES and not expected_role:
+            log.error(f'[RoleSync] No class role available for class {current_level} in {guild.name}')
+            return
 
         if expected_role_id and not expected_role:
             log.error(f'[RoleSync] Role ID {expected_role_id} for class {current_level} not found in {guild.name}')
@@ -7624,12 +7606,9 @@ async def cmd_sync(ctx):
     msg = await ctx.send('⏳ Syncing...')
     total = 0
     for guild in bot.guilds:
-        try:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            total += len(synced)
-        except Exception as e:
-            log.error(f'Sync error {guild.name}: {e}')
+        synced_count = await _sync_app_commands_for_guild(guild, reason='manual')
+        if synced_count is not None:
+            total += synced_count
     await msg.edit(content=f'✅ Sync xong! **{total}** lệnh.')
 
 @bot.command(name='report')
@@ -7703,20 +7682,67 @@ async def _load_startup_extensions():
             log.error('[Startup] Extension %s failed: %s', extension, e, exc_info=True)
 
 
+def _restore_guild_commands(guild: discord.Guild, commands: list):
+    bot.tree.clear_commands(guild=guild)
+    for command in commands:
+        bot.tree.add_command(command, guild=guild, override=True)
+
+
+def _prepare_guild_commands_for_sync(guild: discord.Guild, *, reason: str) -> bool:
+    previous_commands = list(bot.tree.get_commands(guild=guild))
+    try:
+        bot.tree.clear_commands(guild=guild)
+        bot.tree.copy_global_to(guild=guild)
+    except Exception as e:
+        log.error('[CommandSync] Could not prepare commands for %s (%s): %s', guild.name, reason, e, exc_info=True)
+        try:
+            _restore_guild_commands(guild, previous_commands)
+        except Exception:
+            log.error('[CommandSync] Could not restore previous commands for %s.', guild.name, exc_info=True)
+        return False
+
+    if not bot.tree.get_commands(guild=guild):
+        log.error('[CommandSync] Refusing to sync zero commands for %s (%s).', guild.name, reason)
+        try:
+            _restore_guild_commands(guild, previous_commands)
+        except Exception:
+            log.error('[CommandSync] Could not restore previous commands for %s.', guild.name, exc_info=True)
+        return False
+
+    return True
+
+
+async def _sync_app_commands_for_guild(guild: discord.Guild, *, reason: str) -> int | None:
+    if not _prepare_guild_commands_for_sync(guild, reason=reason):
+        return None
+    try:
+        synced = await bot.tree.sync(guild=guild)
+        log.info('[CommandSync] Synced %s commands for %s (%s).', len(synced), guild.name, reason)
+        return len(synced)
+    except Exception as e:
+        log.error('[CommandSync] Failed for %s: %s', guild.name, e, exc_info=True)
+        return None
+
+
 async def _sync_app_commands(*, reason: str = 'startup'):
     for guild in bot.guilds:
-        try:
-            bot.tree.clear_commands(guild=guild)
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            log.info('[CommandSync] Synced %s commands for %s (%s).', len(synced), guild.name, reason)
-        except Exception as e:
-            log.error('[CommandSync] Failed for %s: %s', guild.name, e, exc_info=True)
+        await _sync_app_commands_for_guild(guild, reason=reason)
 
 @bot.event
 async def on_message(message: discord.Message):
     if not message.author.bot:
         await bot.process_commands(message)
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    _capture_guild_context(guild.id)
+    initialize_database()
+    _apply_legacy_env_config_if_empty(guild)
+    await _sync_app_commands_for_guild(guild, reason='guild_join')
+    try:
+        await ensure_class_roles(guild)
+    except Exception as e:
+        log.error('[RoleSetup] Guild join setup failed in %s: %s', guild.name, e, exc_info=True)
 
 @bot.event
 async def on_ready():
