@@ -137,8 +137,7 @@ def _personalized_advice(
     if active_days == 0:
         return (
             '😴 Tuần này bạn chưa học ngày nào. Đừng để streak về 0 nhé!\n'
-            'Chỉ cần 15 phút mỗi ngày là đủ để giữ động lực. 💪\n'
-            '_Mẹo: Dùng `/remind <giờ>` để bot nhắc bạn học mỗi ngày!_'
+            'Chỉ cần 15 phút mỗi ngày là đủ để giữ động lực. 💪'
         )
 
     if active_days == 7:
@@ -155,8 +154,7 @@ def _personalized_advice(
     if active_days <= 2:
         return (
             f'⚠️ Bạn chỉ học **{active_days}/7 ngày** tuần này.\n'
-            f'Học đều quan trọng hơn học nhiều một lần. Thử đặt reminder nhé!\n'
-            f'_Dùng `/remind <giờ>` để bot nhắc bạn học mỗi ngày!_'
+            f'Học đều quan trọng hơn học nhiều một lần. Thử đặt mục tiêu nhỏ bằng `/setgoal` nhé!'
         )
 
     if last_secs > 0:
@@ -199,7 +197,7 @@ def _personalized_advice(
     return (
         f'💡 **{this_h:.1f} tiếng** tuần này — hơi ít đấy!\n'
         f'Thử 30 phút mỗi tối là đủ để cải thiện nhiều.\n'
-        f'_Dùng `/remind <giờ>` để bot nhắc bạn! ⏰_'
+        f'_Dùng `/quest` để lấy thêm động lực mỗi ngày._'
     )
 
 def _build_weekly_dm(
