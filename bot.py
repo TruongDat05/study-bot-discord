@@ -27,9 +27,9 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, send_file
-from pomodoro import PomodoroSession
 from services.database import DatabaseService
 from services.repositories import BotRepository
+from plugins.games.catalog import GAME_CATALOG, GAME_LABELS, GAME_ORDER
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -198,6 +198,8 @@ CONFIG_DEFAULTS = {
     'ai_enabled_channels': [],
     'autoload_plugins': [],
     'command_prefix': '!',
+    'game_channel_ids': [],
+    'game_channel_map': {},
     'notify_channel_mode': 'dm',
     'reminder_delivery': 'dm',
     'room_rent_coin_per_minute': 2,
@@ -207,9 +209,9 @@ CONFIG_DEFAULTS = {
 }
 
 STARTUP_EXTENSIONS = [
+    'plugins.casino',
     'plugins.ai_chat',
     'plugins.study_voice',
-    'plugins.pomodoro',
     'plugins.weekly_report',
     'plugins.moderation',
     'plugins.notify',
@@ -218,7 +220,6 @@ STARTUP_EXTENSIONS = [
     'plugins.rooms',
     'plugins.tasklist',
     'plugins.schedule',
-    'plugins.reminders',
     'plugins.leaderboard',
 ]
 
@@ -414,7 +415,7 @@ def _command_prefix_resolver(client: commands.Bot, message: discord.Message):
             log.warning('[Config] Failed to resolve command_prefix for %s', message.guild.id, exc_info=True)
     return '!'
 
-bot = commands.Bot(command_prefix=_command_prefix_resolver, intents=intents)
+bot = commands.Bot(command_prefix=_command_prefix_resolver, intents=intents, help_command=None)
 
 config_manager = GuildConfigManager(repository)
 
@@ -676,6 +677,7 @@ def _serialize_temp_rooms_snapshot(guild_id: int | None = None) -> dict:
             'owner_id': _as_int(meta.get('owner_id')),
             'guild_id': room_guild_id,
             'created_at': created_at_str,
+            'mode': _room_mode(meta.get('mode')),
         }
     return snapshot
 
@@ -707,6 +709,7 @@ def _restore_temp_rooms_from_snapshot(raw: dict, guild_id: int | None = None):
             'owner_id': _as_int(meta.get('owner_id')),
             'guild_id': room_guild_id,
             'created_at': created_at,
+            'mode': _room_mode(meta.get('mode')),
         }
         restored += 1
 
@@ -1010,7 +1013,7 @@ def _default_user(name: str) -> dict:
         'daily': {},
         'daily_earnings': {},
         'total': 0,
-        'balance': 0,
+        'balance': 100000,
         'total_earned': 0,
         'debt': 0,
         'net_worth': 0,
@@ -1297,8 +1300,6 @@ def _notice_title_color_from_text(message: str) -> tuple[str, int]:
         or 'không tìm thấy' in text
     ):
         return 'Cảnh báo', NOTIFY_RED
-    if 'pomodoro đã dừng' in text:
-        return 'Pomodoro đã dừng', NOTIFY_GOLD
     if 'nhắc học' in text or 'nhắc' in text or 'chưa học' in text:
         return 'Nhắc nhở', NOTIFY_GOLD
     if 'chào mừng' in text or 'phòng học tạm đã được tạo' in text:
@@ -2052,13 +2053,6 @@ def _split_seconds_by_day(start_time: datetime, end_time: datetime) -> list[tupl
         cursor = segment_end
     return parts
 
-def _get_pomodoro_phase_start(sess) -> datetime:
-    if getattr(sess, 'phase', None) == 'work':
-        return sess.phase_end - timedelta(minutes=sess.work_minutes)
-    if getattr(sess, 'phase', None) == 'break':
-        return sess.phase_end - timedelta(minutes=sess.break_minutes)
-    return sess.phase_end
-
 def _resolve_study_window(
     member_id: int,
     start_time: datetime,
@@ -2071,21 +2065,6 @@ def _resolve_study_window(
     checkpoint = last_checkpoint.get(member_id, session_start or start_time)
     effective_start = max(start_time, checkpoint)
     effective_end = end_time
-    sess = _get_pomodoro_session(member_id)
-
-    if sess:
-        if sess.phase == 'work':
-            phase_start = _get_pomodoro_phase_start(sess)
-            effective_end = min(effective_end, sess.phase_end)
-            if sess.completed_rounds > 0 or checkpoint >= phase_start:
-                effective_start = max(effective_start, phase_start)
-        elif sess.phase == 'break':
-            break_start = _get_pomodoro_phase_start(sess)
-            prev_work_start = break_start - timedelta(minutes=sess.work_minutes)
-            effective_end = min(effective_end, break_start)
-            effective_start = max(effective_start, prev_work_start)
-        else:
-            return None
 
     if session_start is not None:
         effective_start = max(effective_start, session_start)
@@ -2120,16 +2099,8 @@ def add_study_time(
 ) -> dict:
     if seconds <= 0:
         return {}
-    start_explicit = start_time is not None
     end_time = end_time or datetime.now()
     start_time = start_time or (end_time - timedelta(seconds=seconds))
-    if not start_explicit and member_id in join_times:
-        checkpoint = last_checkpoint.get(member_id, join_times[member_id])
-        sess = _get_pomodoro_session(member_id)
-        if sess and sess.phase == 'work':
-            phase_start = _get_pomodoro_phase_start(sess)
-            if sess.completed_rounds == 0 and checkpoint < phase_start and start_time >= phase_start:
-                start_time = checkpoint
 
     resolved_window = _resolve_study_window(member_id, start_time, end_time)
     if not resolved_window:
@@ -3683,12 +3654,6 @@ def _rebuild_daily_session_state(now: datetime):
     if current_focus_members:
         daily_first_join[today] = current_focus_members[0][1]
 
-def _get_pomodoro_session(member_id: int):
-    pomo_cog = bot.cogs.get('PomodoroCog')
-    if not pomo_cog:
-        return None
-    return getattr(pomo_cog, '_sessions', {}).get(member_id)
-
 def _get_unsaved_study_seconds(member_id: int, now: datetime | None = None) -> int:
     window = _get_pending_study_window(member_id, now or datetime.now())
     if not window:
@@ -3745,7 +3710,7 @@ async def _check_quests_and_badges(member: discord.Member, channel=None):
         
     check_and_award_badges(uid, member)
 
-async def record_leave_and_notify(member: discord.Member, force_in_pomodoro: bool = False) -> int:
+async def record_leave_and_notify(member: discord.Member) -> int:
     _capture_guild_context(member.guild.id)
     if member.id not in join_times: return 0
 
@@ -3807,10 +3772,19 @@ def _guild_focus_channel_ids(guild: discord.Guild) -> set[int]:
     config = get_guild_config(guild.id)
     ids = {_as_int(ch) for ch in config.get('focus_channel_ids', []) if _as_int(ch)}
     for meta in list(temp_rooms.values()):
-        if meta.get('guild_id') == guild.id:
+        if meta.get('guild_id') == guild.id and _room_mode(meta.get('mode')) == 'study':
             room_id = _as_int(meta.get('room_id'))
             if room_id:
                 ids.add(room_id)
+    try:
+        for room in repository.list_active_private_rooms(guild.id):
+            if _room_mode(room.get('mode')) != 'study':
+                continue
+            room_id = _as_int(room.get('channel_id'))
+            if room_id:
+                ids.add(room_id)
+    except Exception as e:
+        log.warning('[FocusChannels] Could not load private rooms for guild %s: %s', guild.id, e)
     return ids
 
 def _channel_belongs_to_guild_focus(channel, guild: discord.Guild) -> bool:
@@ -3972,46 +3946,8 @@ async def _send_daily_board(target_date: str | None = None, guild: discord.Guild
 # ─── REMIND SYSTEM ───────────────────────────────────────────────────────────
 
 async def _remind_loop(member: discord.Member, hour: int):
-    while True:
-        try:
-            _capture_guild_context(member.guild.id)
-            now    = datetime.now()
-            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            delay = (target - now).total_seconds()
-            await asyncio.sleep(delay)
-
-            today      = datetime.now().strftime('%Y-%m-%d')
-            data       = load_data()
-            uid        = str(member.id)
-            today_secs = data.get(uid, {}).get('daily', {}).get(today, 0)
-
-            if today_secs == 0:
-                await send_private_notify_embed(
-                    member=member,
-                    title='Nhắc nhở',
-                    description=(
-                        f'Đến giờ học lúc {hour:02d}:00.\n'
-                        'Hôm nay bạn chưa học phút nào. Vào phòng thôi.'
-                    ),
-                    color=NOTIFY_GOLD,
-                )
-            else:
-                await send_private_notify_embed(
-                    member=member,
-                    title='Nhắc nhở',
-                    description=(
-                        f'Đến giờ học lúc {hour:02d}:00.\n'
-                        f'Bạn đã học `{format_time(today_secs)}` hôm nay. Tiếp tục nhé.'
-                    ),
-                    color=NOTIFY_GOLD,
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.error(f'[Remind] Lỗi vòng lặp nhắc học {member.display_name}: {e}')
-            await asyncio.sleep(60)
+    log.info('[Remind] Study reminder task skipped because reminders are disabled for member_id=%s.', member.id)
+    return
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -4024,48 +3960,6 @@ async def safe_send_dm(member: discord.Member, message: str, *, respect_user_set
         color=color,
         respect_user_setting=respect_user_setting,
     )
-
-async def _force_stop_pomodoro_if_active(member: discord.Member, reason: str = 'rời phòng học') -> bool:
-    """
-    Đồng bộ với PomodoroCog để tránh tiếp tục cộng thời gian/coins khi user rời phòng học.
-    Giữ logic tương đương `/pomodoro stop` nhưng không cần interaction.
-    """
-    pomo_cog = bot.cogs.get('PomodoroCog')
-    if not pomo_cog or member.id not in getattr(pomo_cog, '_sessions', {}):
-        return False
-
-    sess = pomo_cog._sessions.get(member.id)
-    if not sess:
-        return False
-
-    # Nếu đang work phase thì cộng phần đã học của vòng hiện tại.
-    if sess.phase == 'work':
-        elapsed_work = int((sess.work_minutes * 60) - sess.phase_remaining)
-        if elapsed_work > 60:
-            add_study_time(member.id, member.display_name, elapsed_work)
-
-    # Rời group nếu có để tránh vòng kế tiếp tiếp tục tính cho member đã rời.
-    if sess.group_id and sess.group_id in getattr(pomo_cog, '_groups', {}):
-        grp = pomo_cog._groups[sess.group_id]
-        grp.members.pop(member.id, None)
-        if grp.announce_msg:
-            try:
-                await grp.announce_msg.edit(content=pomo_cog._build_group_embed(grp))
-            except Exception:
-                pass
-        if member.id == grp.host.id and grp.members:
-            grp.host = next(iter(grp.members.values())).member
-        if not grp.members:
-            pomo_cog._cancel_group(sess.group_id)
-
-    pomo_cog._cancel_session(member.id)
-    try:
-        pomo_cog._update_history(member.id, sess)
-    except Exception as e:
-        log.error(f'Pomodoro history sync error ({member.display_name}): {e}')
-
-    log.info(f'Pomodoro stopped automatically for {member.display_name}: {reason}')
-    return True
 
 async def _cancel_reminder_task(member_id: int):
     old = remind_tasks.pop(member_id, None)
@@ -4105,11 +3999,22 @@ def _is_create_room_channel(channel) -> bool:
 def _is_temporary_room_id(channel_id: int | None) -> bool:
     return bool(_temp_room_key_for_channel_id(channel_id))
 
+def _temporary_room_mode(channel_id: int | None) -> str | None:
+    if not channel_id:
+        return None
+    meta = _temp_room_meta(channel_id)
+    if not meta:
+        return None
+    return _room_mode(meta.get('mode'))
+
+def _is_temporary_study_room_id(channel_id: int | None) -> bool:
+    return _temporary_room_mode(channel_id) == 'study'
+
 def is_focus_channel(channel_id: int | None) -> bool:
     if not channel_id:
         return False
     if _is_temporary_room_id(channel_id):
-        return True
+        return _is_temporary_study_room_id(channel_id)
     channel = bot.get_channel(channel_id)
     if channel and getattr(channel, 'guild', None):
         return channel_id in _guild_focus_channel_ids(channel.guild)
@@ -4118,16 +4023,24 @@ def is_focus_channel(channel_id: int | None) -> bool:
             return True
     return False
 
-def _temp_room_name(member: discord.Member) -> str:
-    clean_name = ' '.join(member.display_name.split()).strip() or f'User {member.id}'
-    return f'📚 Phòng của {clean_name[:80]}'
+def _room_mode(mode: str | None) -> str:
+    return 'entertainment' if str(mode or '').lower() == 'entertainment' else 'study'
 
-def _register_temporary_room(channel: discord.VoiceChannel, owner: discord.Member):
+def _room_mode_label(mode: str | None) -> str:
+    return 'Phòng giải trí' if _room_mode(mode) == 'entertainment' else 'Phòng học'
+
+def _temp_room_name(member: discord.Member, mode: str = 'study') -> str:
+    clean_name = ' '.join(member.display_name.split()).strip() or f'User {member.id}'
+    prefix = '🎮' if _room_mode(mode) == 'entertainment' else '📚'
+    return f'{prefix} Phòng của {clean_name[:80]}'
+
+def _register_temporary_room(channel: discord.VoiceChannel, owner: discord.Member, mode: str = 'study'):
     temp_rooms[_temp_room_key(channel.guild.id, channel.id)] = {
         'room_id': channel.id,
         'owner_id': owner.id,
         'guild_id': channel.guild.id,
         'created_at': datetime.now(),
+        'mode': _room_mode(mode),
     }
     save_runtime_state()
 
@@ -4218,6 +4131,8 @@ async def _checkpoint_temporary_room_members(channel):
             log.error(f'[TempRoom] Failed to checkpoint {member.display_name} before cleanup: {e}', exc_info=True)
 
 async def _finalize_temporary_room_members(channel, reason: str):
+    if not is_focus_channel(getattr(channel, 'id', None)):
+        return
     for member in list(getattr(channel, 'members', [])):
         if member.bot:
             continue
@@ -4226,17 +4141,120 @@ async def _finalize_temporary_room_members(channel, reason: str):
         except Exception as e:
             log.error(f'[TempRoom] Failed to finalize {member.display_name} before deleting {channel.id}: {e}', exc_info=True)
 
-async def _send_temporary_room_welcome(channel, owner: discord.Member):
+class TemporaryRoomModeView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=60)
+        self.owner_id = int(owner_id)
+        self.selected_mode: str | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message('Chỉ người tạo phòng mới chọn mode phòng.', ephemeral=True)
+        return False
+
+    async def _choose(self, interaction: discord.Interaction, mode: str):
+        self.selected_mode = _room_mode(mode)
+        for item in self.children:
+            item.disabled = True
+        embed = discord.Embed(
+            title='Đã chọn mode phòng',
+            description=f'Mode: **{_room_mode_label(mode)}**. Bot đang tạo phòng cho bạn.',
+            color=0x57F287 if self.selected_mode == 'study' else 0x5865F2,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(label='Phòng học', style=discord.ButtonStyle.success, custom_id='temp_room_mode_study')
+    async def study_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 'study')
+
+    @discord.ui.button(label='Phòng giải trí', style=discord.ButtonStyle.primary, custom_id='temp_room_mode_entertainment')
+    async def entertainment_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 'entertainment')
+
+async def _ask_temporary_room_mode(member: discord.Member, source_channel) -> str:
+    view = TemporaryRoomModeView(member.id)
     embed = discord.Embed(
-        title='Chào mừng đến với phòng học tạm',
+        title='Chọn mode phòng',
         description=(
+            '**Phòng học**\n'
+            f'• Cần bật Cam hoặc Stream trong {WAIT_SECONDS}s.\n'
+            '• Chỉ thời gian bật Cam/Stream mới được tính học và nhận coins.\n\n'
+            '**Phòng giải trí**\n'
+            '• Không bắt buộc bật Cam hoặc Stream.\n'
+            '• Dùng để chơi game hoặc trò chuyện, không tính thời gian học.\n\n'
+            'Nếu hết thời gian chọn, bot sẽ mặc định tạo **Phòng học**.'
+        ),
+        color=0x5865F2,
+    )
+    message = None
+    try:
+        if hasattr(source_channel, 'send'):
+            message = await source_channel.send(
+                content=member.mention,
+                embed=embed,
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+    except discord.HTTPException:
+        message = None
+
+    if message is None:
+        try:
+            message = await member.send(embed=embed, view=view)
+        except discord.HTTPException:
+            return 'study'
+
+    await view.wait()
+    mode = _room_mode(view.selected_mode)
+    if view.selected_mode is not None:
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        return mode
+    if view.selected_mode is None:
+        for item in view.children:
+            item.disabled = True
+        timeout_embed = discord.Embed(
+            title='Hết thời gian chọn mode',
+            description='Bot mặc định tạo **Phòng học**.',
+            color=0xFEE75C,
+        )
+        try:
+            await message.edit(embed=timeout_embed, view=view)
+        except discord.HTTPException:
+            pass
+    return mode
+
+async def _send_temporary_room_welcome(channel, owner: discord.Member):
+    mode = _temporary_room_mode(getattr(channel, 'id', None)) or 'study'
+    if mode == 'entertainment':
+        title = 'Chào mừng đến với phòng giải trí'
+        description = (
             f'Chủ phòng: **{owner.display_name}**\n\n'
-            '**Hướng dẫn**\n'
+            '**Mode phòng**\n'
+            '• Đây là **Phòng giải trí**.\n'
+            '• Không bắt buộc bật Cam hoặc Stream.\n'
+            '• Phòng dùng để chơi game hoặc trò chuyện, không tính thời gian học và không cộng coins học.\n'
+            '• Phòng sẽ tự xóa sau khi không còn thành viên thật nào ở lại.\n\n'
+            '**Chúc bạn chơi vui :3**'
+        )
+    else:
+        title = 'Chào mừng đến với phòng học tạm'
+        description = (
+            f'Chủ phòng: **{owner.display_name}**\n\n'
+            '**Mode phòng**\n'
+            '• Đây là **Phòng học**.\n'
             f'• Bật **Cam 📷 hoặc Stream 📺** trong **{WAIT_SECONDS}s** để bắt đầu tính giờ.\n'
-            '• Bot chỉ cộng thời gian và coins khi bạn đang bật Cam hoặc Stream.\n'
+            '• Bot chỉ cộng thời gian học và coins khi bạn đang bật Cam hoặc Stream.\n'
             '• Phòng sẽ tự xóa sau khi không còn thành viên thật nào ở lại.\n\n'
             '**Chúc bạn học vui :3**'
-        ),
+        )
+    embed = discord.Embed(
+        title=title,
+        description=description,
         color=0xFEE75C,
     )
     try:
@@ -4307,11 +4325,15 @@ async def _handle_create_room_join(member: discord.Member, source_channel) -> bo
         )
         return False
 
+    room_mode = await _ask_temporary_room_mode(member, source_channel)
+    if not (member.voice and member.voice.channel and member.voice.channel.id == source_channel.id):
+        return False
+
     try:
         temp_channel = await guild.create_voice_channel(
-            _temp_room_name(member),
+            _temp_room_name(member, room_mode),
             category=category,
-            reason=f'Temporary study room for {member} ({member.id})',
+            reason=f'Temporary {_room_mode(room_mode)} room for {member} ({member.id})',
         )
     except discord.Forbidden:
         log.error(f'[TempRoom] Missing permission to create room in {guild.name}')
@@ -4326,7 +4348,7 @@ async def _handle_create_room_join(member: discord.Member, source_channel) -> bo
         await safe_send_dm(member, 'Có lỗi khi tạo phòng học tạm. Thử lại sau nhé.', respect_user_setting=False)
         return False
 
-    _register_temporary_room(temp_channel, member)
+    _register_temporary_room(temp_channel, member, room_mode)
 
     try:
         if not (member.voice and member.voice.channel and member.voice.channel.id == source_channel.id):
@@ -4362,15 +4384,12 @@ async def _handle_create_room_join(member: discord.Member, source_channel) -> bo
     return True
 
 async def _handle_focus_leave(member: discord.Member, channel, reason: str = 'rời phòng học') -> int:
-    pomo_cog = bot.cogs.get('PomodoroCog')
-    was_in_pomo = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
     _, checkpoint_result = await _do_checkpoint(member)
     media_active_members.discard(member.id)
 
-    await _force_stop_pomodoro_if_active(member, reason=reason)
     if checkpoint_result.get('level_up'):
         await _ensure_role_synced(member, checkpoint_result['new_level'])
-    duration = await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
+    duration = await record_leave_and_notify(member)
     cancel_task(member.id)
     log.info(f'{member.display_name} rời phòng sau {format_time(duration)}')
 
@@ -4432,11 +4451,8 @@ async def check_media(member: discord.Member):
                 is_focus_channel(member.voice.channel.id)): return
         if not is_media_active(member.voice):
             if not bot_can_move(member): return
-            pomo_cog = bot.cogs.get('PomodoroCog')
-            was_in_pomo = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
             _, checkpoint_result = await _do_checkpoint(member)
             media_active_members.discard(member.id)
-            await _force_stop_pomodoro_if_active(member, reason='bị kick (không bật camera/stream)')
             if checkpoint_result.get('level_up'):
                 await _ensure_role_synced(member, checkpoint_result['new_level'])
             notice_channel = member.voice.channel
@@ -4450,7 +4466,7 @@ async def check_media(member: discord.Member):
                 ),
                 color=NOTIFY_RED,
             )
-            await record_leave_and_notify(member, force_in_pomodoro=was_in_pomo)
+            await record_leave_and_notify(member)
             await member.move_to(None)
     except asyncio.CancelledError:
         pass
@@ -4478,7 +4494,6 @@ async def scheduled_tasks():
             await _send_daily_board()
 
     if now.hour == 9 and now.minute == 0:
-        await _check_absences()
         await _check_overdue_loan_notifications()
 
     if now.hour == 4 and now.minute == 0:
@@ -4510,8 +4525,6 @@ async def checkpoint_task():
     if stale_lock_ids:
         log.info(f'[Cleanup] Pruned {len(stale_lock_ids)} stale role sync locks.')
 
-    pomo_cog      = bot.cogs.get('PomodoroCog')
-    pomo_sessions = pomo_cog._sessions if pomo_cog else {}
     for mid in list(join_times.keys()):
         member = None
         for guild in bot.guilds:
@@ -4530,7 +4543,6 @@ async def checkpoint_task():
 
         was_active = mid in media_active_members
         now_active = bool(member.voice and is_media_active(member.voice))
-        in_pomo    = mid in pomo_sessions
         _capture_guild_context(member.guild.id)
         runtime_member_guild_ids[mid] = member.guild.id
         
@@ -4609,43 +4621,8 @@ async def _send_report(guild: discord.Guild | None = None):
             await ch.send(chunk)
 
 async def _check_absences():
-    today     = datetime.now().strftime('%Y-%m-%d')
-    warn_date = (datetime.now() - timedelta(days=ABSENT_DAYS_WARN)).strftime('%Y-%m-%d')
-
-    for guild in bot.guilds:
-        def claim_absence_warnings(current: dict):
-            warnings = []
-            for uid, info in current.items():
-                last_date   = info.get('last_study_date', '')
-                last_warned = info.get('last_absent_warn', '')
-                if not last_date or last_date >= warn_date or last_warned == today:
-                    continue
-                try:
-                    member_id = int(uid)
-                    last_dt = datetime.strptime(last_date, '%Y-%m-%d')
-                except (ValueError, TypeError):
-                    continue
-                member = guild.get_member(member_id)
-                if not member:
-                    continue
-                info['last_absent_warn'] = today
-                warnings.append((member, last_dt, info.get('streak', 0)))
-            return warnings
-
-        with guild_data_context(guild.id):
-            warnings, _ = update_data(claim_absence_warnings)
-        for member, last_dt, streak in warnings:
-            days = (datetime.now() - last_dt).days
-            with guild_data_context(guild.id):
-                await send_private_notify_embed(
-                    member=member,
-                    title='Nhắc nhở',
-                    description=(
-                        f'Bạn đã không học trong **{days} ngày**.\n'
-                        f'Streak hiện tại: `{streak} ngày`. Vào phòng để giữ nhịp học nhé.'
-                    ),
-                    color=NOTIFY_GOLD,
-                )
+    log.info('[Remind] Absence study reminders are disabled; skipping check.')
+    return
 
 async def _check_overdue_loan_notifications():
     for guild in bot.guilds:
@@ -4670,7 +4647,6 @@ async def _sync_member_progress(member: discord.Member, previous_level: int | No
     if (
         member.id in join_times
         and member.id in media_active_members
-        and _get_pomodoro_session(member.id) is None
         and _last_data_save_success
     ):
         last_checkpoint[member.id] = datetime.now()
@@ -4698,6 +4674,11 @@ DEFAULT_AI_SYSTEM_PROMPT = (
     'Never pad answers. Never be shallow. '
     'Prefer complete answers over over-compressed summaries; the bot will fit long answers into one Discord message after generation. '
     'Use Discord markdown when helpful. '
+    'For Vietnamese conversations, adapt address pronouns to the user vibe: mình/bạn, tôi/bạn, tôi/ông, t/m, or tao/mày. '
+    'Mirror casual intimate pronouns only when the user has clearly used them first and the exchange is friendly or joking. '
+    'Never start using mày/tao on your own. '
+    'If the conversation is tense, sensitive, argumentative, or contains personal attacks, switch to neutral polite pronouns such as mình/bạn or tôi/bạn. '
+    'Some rude words may be playful among friends, so read context, but do not escalate hostility. '
     'If unsure, say so briefly.'
 )
 AI_SYSTEM_PROMPT = os.getenv('AI_SYSTEM_PROMPT') or DEFAULT_AI_SYSTEM_PROMPT
@@ -5397,7 +5378,6 @@ async def slash_stats(
     badges     = info.get('badges', [])
     goal       = info.get('goal')
     goal_secs  = info.get('goal_seconds', 0)
-    remind_h   = info.get('remind_hour')
     daily       = info.get('daily', {})
     earnings    = info.get('daily_earnings', {})
     if period == 'week':
@@ -5430,8 +5410,6 @@ async def slash_stats(
     if goal and goal_secs > 0:
         pct = min(100, int((today_saved / goal_secs) * 100))
         msg += f'🎯 **{goal}**: `{pct}%`\n'
-    if remind_h is not None:
-        msg += f'⏰ Nhắc học: `{remind_h:02d}:00` hàng ngày\n'
     msg += f'📅 7 ngày:\n{recent_str}\n'
     msg += f'\n_Dùng `/card` để tạo ảnh profile!_'
     await interaction.followup.send(msg, ephemeral=True)
@@ -5474,10 +5452,10 @@ async def slash_leaderboard(interaction: discord.Interaction, metric: str = 'stu
         data = _get_live_enriched_data(interaction.guild)
         lines = [f'🏆 **Leaderboard — {metric}**\n']
         if metric == 'coins':
-            rows = sorted(data.values(), key=lambda info: _as_int(info.get('total_earned', 0)), reverse=True)
-            rows = [row for row in rows if _as_int(row.get('total_earned', 0)) > 0][:10]
+            rows = sorted(data.values(), key=lambda info: _as_int(info.get('balance', 0)), reverse=True)
+            rows = [row for row in rows if _as_int(row.get('balance', 0)) > 0][:10]
             for index, info in enumerate(rows, 1):
-                lines.append(f'`{index}.` **{info.get("name", "Unknown")}** · `{format_coins(info.get("total_earned", 0))}` earned')
+                lines.append(f'`{index}.` **{info.get("name", "Unknown")}** · balance `{format_coins(info.get("balance", 0))}`')
         elif metric == 'streak':
             rows = sorted(data.values(), key=lambda info: _as_int(info.get('streak', 0)), reverse=True)
             rows = [row for row in rows if _as_int(row.get('streak', 0)) > 0][:10]
@@ -5563,9 +5541,106 @@ async def slash_top_alltime(interaction: discord.Interaction):
 
 # ── Wallet & Economy ───────────────────────────────────────────────────────
 
+def _wallet_message_for_member(target: discord.Member, data: dict) -> str:
+    uid = str(target.id)
+    if uid not in data:
+        return f'❌ **{target.display_name}** chưa có ví.'
+    info = data[uid]
+    debt = _active_debt(info)
+    class_idx = info.get('class', info.get('level', 0))
+    return (
+        f'💼 **Ví của {target.display_name}**\n'
+        f'💵 Balance: `{format_coins(info.get("balance", 0))}`\n'
+        f'💰 Total earned: `{format_coins(info.get("total_earned", 0))}`\n'
+        f'🏛️ Class: `{class_label(class_idx)}`\n'
+        f'💳 Debt: `{format_coins(debt)}` · Net worth: `{format_coins(info.get("balance", 0) - debt)}`\n'
+        f'⭐ Credit score: `{_credit_score(info)}`'
+    )
+
+
+def _game_setup_channel_ids(guild_id: int | None) -> list[int]:
+    if not guild_id:
+        return []
+    ids: list[int] = []
+    for channel_id in _guild_game_channel_ids(int(guild_id)):
+        if channel_id and channel_id not in ids:
+            ids.append(channel_id)
+    for channel_id in _guild_game_channel_map(int(guild_id)).keys():
+        if channel_id and channel_id not in ids:
+            ids.append(channel_id)
+    return ids
+
+
+def _game_setup_channel_error(guild: discord.Guild | None, guild_id: int | None) -> str:
+    channel_ids = _game_setup_channel_ids(guild_id)
+    if not channel_ids:
+        return '❌ Admin chưa set kênh game. Dùng `/admin game_channels add <channel>` trước.'
+    allowed_text = _format_config_channels(guild, channel_ids) if guild else ', '.join(f'`{cid}`' for cid in channel_ids)
+    return f'❌ Lệnh tiền/game chỉ dùng được trong kênh đã set game.\nKênh game hiện tại: {allowed_text}'
+
+
+async def _require_game_setup_channel_interaction(interaction: discord.Interaction) -> bool:
+    if interaction.guild_id is None or interaction.channel_id is None:
+        await interaction.response.send_message('❌ Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return False
+    if _is_configured_game_channel(interaction.guild_id, interaction.channel_id):
+        return True
+    message = _game_setup_channel_error(interaction.guild, interaction.guild_id)
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+    return False
+
+
+async def _require_game_setup_channel_message(message: discord.Message) -> bool:
+    if message.guild is None:
+        await message.channel.send('❌ Lệnh này chỉ dùng được trong server.')
+        return False
+    if _is_configured_game_channel(message.guild.id, message.channel.id):
+        return True
+    await message.channel.send(_game_setup_channel_error(message.guild, message.guild.id))
+    return False
+
+
+async def _send_wallet_text_command(message: discord.Message, raw_target: str | None = None) -> None:
+    if message.guild is None:
+        await message.channel.send('❌ Lệnh này chỉ dùng được trong server.')
+        return
+    if not await _require_game_setup_channel_message(message):
+        return
+    _capture_guild_context(message.guild.id)
+    target = message.author
+    if message.mentions:
+        target = message.mentions[0]
+    elif raw_target:
+        target = None
+        raw_id = str(raw_target).strip().removeprefix('<@').removeprefix('!').removesuffix('>')
+        if raw_id.isdigit():
+            target = message.guild.get_member(int(raw_id))
+            if target is None:
+                with contextlib.suppress(discord.HTTPException):
+                    target = await message.guild.fetch_member(int(raw_id))
+        if target is None:
+            await message.channel.send('❌ Không tìm thấy thành viên đó.')
+            return
+
+    uid = str(target.id)
+    if target.id == message.author.id:
+        def ensure_self(data: dict):
+            _ensure_account(data, uid, target.display_name)
+
+        _, data = update_data(ensure_self)
+    else:
+        data = load_data()
+    await message.channel.send(_wallet_message_for_member(target, data))
+
+
 @bot.tree.command(name='balance', description='Xem ví coins của bạn hoặc thành viên khác')
 @app_commands.describe(member='Thành viên (để trống = bản thân)')
 async def slash_balance(interaction: discord.Interaction, member: discord.Member = None):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     target = member or interaction.user
     is_self = target.id == interaction.user.id
     await interaction.response.defer(ephemeral=is_self)
@@ -5579,22 +5654,7 @@ async def slash_balance(interaction: discord.Interaction, member: discord.Member
     else:
         data = load_data()
 
-    if uid not in data:
-        await interaction.followup.send(f'❌ **{target.display_name}** chưa có ví.', ephemeral=is_self)
-        return
-
-    info = data[uid]
-    debt = _active_debt(info)
-    class_idx = info.get('class', info.get('level', 0))
-    msg = (
-        f'💼 **Ví của {target.display_name}**\n'
-        f'💵 Balance: `{format_coins(info.get("balance", 0))}`\n'
-        f'💰 Total earned: `{format_coins(info.get("total_earned", 0))}`\n'
-        f'🏛️ Class: `{class_label(class_idx)}`\n'
-        f'💳 Debt: `{format_coins(debt)}` · Net worth: `{format_coins(info.get("balance", 0) - debt)}`\n'
-        f'⭐ Credit score: `{_credit_score(info)}`'
-    )
-    await interaction.followup.send(msg, ephemeral=is_self)
+    await interaction.followup.send(_wallet_message_for_member(target, data), ephemeral=is_self)
 
 
 @bot.tree.command(name='pay', description='Chuyển coins ảo cho thành viên khác')
@@ -5604,6 +5664,8 @@ async def slash_pay(
     member: discord.Member,
     amount: app_commands.Range[int, 1, 1_000_000_000],
 ):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     if member.bot:
         await interaction.followup.send('❌ Không thể chuyển coins cho bot.', ephemeral=True)
@@ -5651,6 +5713,8 @@ async def slash_transactions(
     interaction: discord.Interaction,
     limit: app_commands.Range[int, 1, 25] = 10,
 ):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
 
@@ -5745,6 +5809,8 @@ async def loan_borrow(
     interaction: discord.Interaction,
     amount: app_commands.Range[int, 1, 1_000_000_000],
 ):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
 
@@ -5814,6 +5880,8 @@ async def loan_repay(
     interaction: discord.Interaction,
     amount: app_commands.Range[int, 1, 1_000_000_000],
 ):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
 
@@ -5886,6 +5954,8 @@ async def loan_repay(
 
 @loan_group.command(name='status', description='Xem nợ, lãi, hạn trả và credit score')
 async def loan_status(interaction: discord.Interaction):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
 
@@ -5895,6 +5965,11 @@ async def loan_status(interaction: discord.Interaction):
     _, data = update_data(ensure_self)
     info = data[uid]
     loans = _active_loans(info)
+    incoming = _pending_incoming_offers(data, uid)
+    outgoing = [
+        offer for offer in info.get('loan_offers', [])
+        if isinstance(offer, dict) and offer.get('status', 'pending') == 'pending'
+    ]
     lines = [
         f'💳 **Loan status — {interaction.user.display_name}**',
         f'Debt: `{format_coins(_active_debt(info))}` · Balance: `{format_coins(info.get("balance", 0))}` · Credit score: `{_credit_score(info)}`',
@@ -5904,6 +5979,16 @@ async def loan_status(interaction: discord.Interaction):
     else:
         lines.append('\n**Khoản vay active:**')
         lines.extend(_loan_line(loan) for loan in loans)
+    if incoming:
+        lines.append('\n**Offer bạn có thể nhận:**')
+        lines.extend(_offer_line(offer, incoming=True) for offer in incoming[:5])
+        if len(incoming) > 5:
+            lines.append(f'_...còn {len(incoming) - 5} offer khác_')
+    if outgoing:
+        lines.append('\n**Offer bạn đã gửi:**')
+        lines.extend(_offer_line(offer, incoming=False) for offer in outgoing[:5])
+        if len(outgoing) > 5:
+            lines.append(f'_...còn {len(outgoing) - 5} offer khác_')
     await interaction.followup.send('\n'.join(lines), ephemeral=True)
 
 
@@ -5916,6 +6001,8 @@ async def loan_offer(
     interest_percent: app_commands.Range[float, 0.0, 100.0],
     days: app_commands.Range[int, 1, 365],
 ):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     if member.bot:
         await interaction.followup.send('❌ Không thể cho bot vay.', ephemeral=True)
@@ -5982,6 +6069,8 @@ async def loan_offer(
 @loan_group.command(name='accept', description='Chấp nhận loan offer')
 @app_commands.describe(loan_id='ID của loan offer')
 async def loan_accept(interaction: discord.Interaction, loan_id: str):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     borrower_uid = str(interaction.user.id)
 
@@ -6054,6 +6143,8 @@ async def loan_accept(interaction: discord.Interaction, loan_id: str):
 @loan_group.command(name='cancel', description='Hủy loan offer pending của bạn')
 @app_commands.describe(loan_id='ID của loan offer')
 async def loan_cancel(interaction: discord.Interaction, loan_id: str):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     lender_uid = str(interaction.user.id)
 
@@ -6081,6 +6172,8 @@ async def loan_cancel(interaction: discord.Interaction, loan_id: str):
 
 @loan_group.command(name='history', description='Xem lịch sử loan gần đây')
 async def loan_history(interaction: discord.Interaction):
+    if not await _require_game_setup_channel_interaction(interaction):
+        return
     await interaction.response.defer(ephemeral=True)
     uid = str(interaction.user.id)
 
@@ -6186,49 +6279,27 @@ async def slash_setgoal(
         f'✅ Mục tiêu: **"{goal}"** — `{format_time(total)}`/ngày 💪', ephemeral=True
     )
 
-# ── /remind ────────────────────────────────────────────────────────────────
+# ── /remind disabled ───────────────────────────────────────────────────────
 
-@bot.tree.command(name='remind', description='Đặt giờ nhắc học hàng ngày qua DM (-1 để tắt)')
-@app_commands.describe(hour='Giờ nhắc (0-23), nhập -1 để tắt')
+@bot.tree.command(name='remind', description='Tính năng nhắc học tự động đã tắt')
+@app_commands.describe(hour='Tham số cũ, không còn tạo nhắc học')
 async def slash_remind(interaction: discord.Interaction, hour: app_commands.Range[int, -1, 23]):
     await interaction.response.defer(ephemeral=True)
     uid  = str(interaction.user.id)
-
-    if hour == -1:
-        old = remind_tasks.pop(interaction.user.id, None)
-        if old:
-            task = old[1]
-            if task and not task.done(): task.cancel()
-
-        def disable_remind(data: dict):
-            if uid in data:
-                data[uid]['remind_hour'] = None
-
-        update_data(disable_remind)
-        await interaction.followup.send(
-            '🔕 Đã tắt nhắc học.\n_Dùng `/remind <giờ>` để bật lại._', ephemeral=True
-        )
-        return
-
-    def enable_remind(data: dict):
-        if uid not in data:
-            data[uid] = _default_user(interaction.user.display_name)
-        data[uid]['remind_hour'] = hour
-
-    update_data(enable_remind)
 
     old = remind_tasks.pop(interaction.user.id, None)
     if old:
         task = old[1]
         if task and not task.done(): task.cancel()
 
-    t = asyncio.create_task(_remind_loop(interaction.user, hour))
-    remind_tasks[interaction.user.id] = (hour, t)
+    def disable_remind(data: dict):
+        if uid in data:
+            data[uid]['remind_hour'] = None
+
+    update_data(disable_remind)
 
     await interaction.followup.send(
-        f'⏰ Đã đặt nhắc học lúc **{hour:02d}:00** mỗi ngày!\n'
-        f'Bot sẽ DM bạn nhắc học đúng giờ.\n'
-        f'_Tắt: `/remind -1`_',
+        'Tính năng nhắc học tự động đã được tắt. Bot sẽ không gửi DM hoặc thông báo nhắc học.',
         ephemeral=True
     )
 
@@ -6300,94 +6371,6 @@ class RoomRenameModal(discord.ui.Modal, title='Đổi tên phòng'):
 
 def _interaction_display_name(interaction: discord.Interaction) -> str:
     return getattr(interaction.user, 'display_name', getattr(interaction.user, 'name', 'Unknown'))
-
-
-async def _call_pomodoro_command(
-    interaction: discord.Interaction,
-    command_name: str,
-    *args,
-):
-    _capture_guild_context(interaction.guild_id)
-    pomo_cog = bot.cogs.get('PomodoroCog')
-    command = getattr(pomo_cog, command_name, None) if pomo_cog else None
-    callback = getattr(command, 'callback', None)
-    if not callback:
-        await interaction.response.send_message('❌ Pomodoro chưa sẵn sàng. Thử lại sau nhé.', ephemeral=True)
-        return
-
-    try:
-        await callback(pomo_cog, interaction, *args)
-    except Exception as e:
-        log.error(f'[RoomPanel] Pomodoro button failed ({command_name}): {e}', exc_info=True)
-        message = '❌ Không thể xử lý Pomodoro lúc này. Thử lại sau nhé.'
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
-
-
-class _SilentPomodoroChannel:
-    async def send(self, *args, **kwargs):
-        return None
-
-
-async def _panel_pomodoro_start(interaction: discord.Interaction):
-    _capture_guild_context(interaction.guild_id)
-    pomo_cog = bot.cogs.get('PomodoroCog')
-    if not pomo_cog:
-        await interaction.response.send_message('❌ Pomodoro chưa sẵn sàng. Thử lại sau nhé.', ephemeral=True)
-        return
-
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message('❌ Pomodoro trong dashboard chỉ dùng được trong server.', ephemeral=True)
-        return
-
-    sess = getattr(pomo_cog, '_sessions', {}).get(member.id)
-    if sess and getattr(sess, 'group_id', None):
-        await _call_pomodoro_command(interaction, 'pomo_start', 25, 5, 4)
-        return
-    if sess:
-        await interaction.response.send_message(
-            f'⚠️ Bạn đang có phiên Pomodoro chạy rồi!\n'
-            f'Phase: `{sess.phase.upper()}` | Còn lại: `{sess.format_remaining()}`\n'
-            f'Dùng nút **Dừng** trước khi bắt đầu phiên mới.',
-            ephemeral=True,
-        )
-        return
-
-    work, break_, rounds = 25, 5, 4
-    sess = PomodoroSession(
-        member=member,
-        work_minutes=work,
-        break_minutes=break_,
-        total_rounds=rounds,
-        channel=_SilentPomodoroChannel(),
-        phase_end=datetime.now() + timedelta(minutes=work),
-    )
-    pomo_cog._sessions[member.id] = sess
-
-    await interaction.response.send_message(
-        f'🍅 Phiên Pomodoro đã bắt đầu! `{work}m làm / {break_}m nghỉ × {rounds} vòng`\n'
-        f'Dùng nút **Trạng thái** để xem tiến độ.',
-        ephemeral=True,
-    )
-    await pomo_cog._send_dm(
-        member,
-        f'🍅 **Pomodoro bắt đầu!**\n'
-        f'⏱️ Làm việc: `{work} phút` × `{rounds} vòng`\n'
-        f'☕ Nghỉ: `{break_} phút` giữa mỗi vòng\n'
-        f'Tập trung nào! Tắt điện thoại, đóng tab thừa. 💪',
-    )
-    sess.task = asyncio.create_task(pomo_cog._run_personal(sess))
-
-
-async def _panel_pomodoro_stop(interaction: discord.Interaction):
-    await _call_pomodoro_command(interaction, 'pomo_stop')
-
-
-async def _panel_pomodoro_status(interaction: discord.Interaction):
-    await _call_pomodoro_command(interaction, 'pomo_status')
 
 
 async def _panel_show_balance(interaction: discord.Interaction):
@@ -6700,35 +6683,23 @@ class RoomControlView(discord.ui.View):
         else:
             await interaction.followup.send('❌ Xóa phòng thất bại. Kiểm tra quyền bot rồi thử lại.', ephemeral=True)
 
-    @discord.ui.button(label='Bắt đầu', emoji='🍅', style=discord.ButtonStyle.success, row=1, custom_id='pomo_start')
-    async def pomo_start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _panel_pomodoro_start(interaction)
-
-    @discord.ui.button(label='Dừng', emoji='⏹️', style=discord.ButtonStyle.secondary, row=1, custom_id='pomo_stop')
-    async def pomo_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _panel_pomodoro_stop(interaction)
-
-    @discord.ui.button(label='Trạng thái', emoji='📊', style=discord.ButtonStyle.secondary, row=1, custom_id='pomo_status')
-    async def pomo_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _panel_pomodoro_status(interaction)
-
-    @discord.ui.button(label='Ví tiền', emoji='💰', style=discord.ButtonStyle.primary, row=2, custom_id='eco_balance')
+    @discord.ui.button(label='Ví tiền', emoji='💰', style=discord.ButtonStyle.primary, row=1, custom_id='eco_balance')
     async def eco_balance(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _panel_show_balance(interaction)
 
-    @discord.ui.button(label='Vay', emoji='🏦', style=discord.ButtonStyle.primary, row=2, custom_id='eco_borrow')
+    @discord.ui.button(label='Vay', emoji='🏦', style=discord.ButtonStyle.primary, row=1, custom_id='eco_borrow')
     async def eco_borrow(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(BorrowModal())
 
-    @discord.ui.button(label='Trả nợ', emoji='💳', style=discord.ButtonStyle.secondary, row=2, custom_id='eco_repay')
+    @discord.ui.button(label='Trả nợ', emoji='💳', style=discord.ButtonStyle.secondary, row=1, custom_id='eco_repay')
     async def eco_repay(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RepayModal())
 
-    @discord.ui.button(label='Cho vay', emoji='🤝', style=discord.ButtonStyle.success, row=2, custom_id='eco_lend')
+    @discord.ui.button(label='Cho vay', emoji='🤝', style=discord.ButtonStyle.success, row=1, custom_id='eco_lend')
     async def eco_lend(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(LendModal())
 
-    @discord.ui.button(label='Nợ/Vay', emoji='📜', style=discord.ButtonStyle.secondary, row=2, custom_id='loan_status')
+    @discord.ui.button(label='Nợ/Vay', emoji='📜', style=discord.ButtonStyle.secondary, row=1, custom_id='loan_status')
     async def loan_status(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _panel_loan_status(interaction)
 
@@ -6745,8 +6716,6 @@ class RoomPanelView(discord.ui.View):
                 'Chọn chức năng bạn muốn dùng:\n\n'
                 '**🏠 Phòng**\n'
                 '🔒 Khóa · 🔓 Mở · 📝 Đổi tên · 🗑️ Xóa\n\n'
-                '**🍅 Pomodoro**\n'
-                '🍅 Bắt đầu · ⏹️ Dừng · 📊 Trạng thái\n\n'
                 '**💰 Kinh tế**\n'
                 '💰 Ví tiền · 🏦 Vay · 💳 Trả nợ · 🤝 Cho vay · 📜 Nợ/Vay'
             ),
@@ -6807,10 +6776,65 @@ async def slash_roles(interaction: discord.Interaction):
 
 # ── /help ──────────────────────────────────────────────────────────────────
 
-@bot.tree.command(name='help', description='Danh sách tất cả lệnh của bot')
-async def slash_help(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    msg = (
+def _build_game_help_lines(guild_id: int | None, channel_id: int | None) -> list[str]:
+    channel_games = (
+        _channel_game_keys(int(guild_id), int(channel_id))
+        if guild_id and channel_id else set()
+    )
+    show_all_games = GAME_CHANNEL_ALL in channel_games
+    lines: list[str] = []
+    for game_key in GAME_ORDER:
+        if not show_all_games and game_key not in channel_games:
+            continue
+        spec = GAME_CATALOG[game_key]
+        commands = ' · '.join(f'`{command}`' for command in spec['commands'])
+        detail_lines = ''.join(f'\n- {line}' for line in spec.get('details', ()))
+        lines.append(
+            f'**{spec["label"]}**\n'
+            f'Lệnh: {commands}\n'
+            f'Cách chơi: {spec["how_to"]}'
+            f'{detail_lines}'
+        )
+    return lines
+
+
+def _is_configured_game_channel(guild_id: int | None, channel_id: int | None) -> bool:
+    if not guild_id or not channel_id:
+        return False
+    return int(channel_id) in _game_setup_channel_ids(int(guild_id))
+
+
+def _build_game_only_help_message(guild_id: int | None, channel_id: int | None) -> str:
+    game_lines = _build_game_help_lines(guild_id, channel_id)
+    game_help = '\n\n'.join(game_lines) if game_lines else '_Channel này chưa được gán game nào._'
+    return (
+        '🎰 **LỆNH GAME CỦA KÊNH NÀY**\n'
+        '━━━━━━━━━━━━━━━━━━━━\n\n'
+        f'{_build_game_economy_help(guild_id)}\n\n'
+        f'{game_help}\n\n'
+        '`!help` · `!command` · `!commands` — xem lại hướng dẫn game của kênh này.'
+    )
+
+
+def _build_game_economy_help(guild_id: int | None = None) -> str:
+    coin_rate = coins_per_minute_for(guild_id)
+    return (
+        '**💰 Tiền, daily và vay coins**\n'
+        f'- Check tiền: `!wallet`, `!balance`, `!bal` hoặc `/balance`. Thêm `@member` để xem ví người khác nếu cần.\n'
+        '- Ví hiển thị balance hiện tại, total earned, class, debt và credit score.\n'
+        f'- Kiếm tiền học tập: vào phòng học và bật Cam hoặc Stream; bot cộng khoảng `{format_coins(coin_rate)}/phút` theo cấu hình server.\n'
+        '- Kiếm tiền mỗi ngày: `/daily`, `!daily` hoặc `daily` nhận ngẫu nhiên `1,000-5,000` coins mỗi 24 giờ.\n'
+        '- Kiếm thêm bằng task: `/tasks ideas`, `/tasks preset`, `/tasks add`, rồi `/tasks done <task_id>` để nhận coins.\n'
+        '- Kiếm thêm bằng game: thắng game được cộng vào cùng ví; thua game trừ đúng tiền cược.\n'
+        f'- Vay bot: `/loan borrow <amount>` vay tối đa `{format_coins(MAX_BOT_LOAN_AMOUNT)}`/khoản, lãi `{BOT_LOAN_INTEREST_PERCENT:g}%`, hạn `{BOT_LOAN_DAYS}` ngày.\n'
+        '- Trả nợ/xem nợ: `/loan repay <amount>` để trả, `/loan status` để xem nợ, hạn trả, offer và credit score.\n'
+        '- Vay/cho vay người khác: `/loan offer <member> <amount> <interest_percent> <days>`, người nhận dùng `/loan accept <loan_id>`.\n'
+        '- Xem lịch sử tiền: `/transactions [limit]`; chuyển tiền cho người khác bằng `/pay <member> <amount>`.'
+    )
+
+
+def _build_full_help_message() -> str:
+    return (
         '📚 **STUDY BOT — DANH SÁCH LỆNH**\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
         '**📊 Thống kê cá nhân**\n'
@@ -6819,32 +6843,25 @@ async def slash_help(interaction: discord.Interaction):
         '`/card [member]` — Tạo ảnh profile card\n'
         '`/badges [member]` — Xem huy hiệu\n\n'
         '**💰 Economy**\n'
-        '`/balance [member]` — Xem balance, total earned, debt\n'
+        '`!wallet [@member]` hoặc `!balance [@member]` — Xem balance, total earned, debt\n'
+        '`/daily` — Nhận ngẫu nhiên 1,000-5,000 coins mỗi 24h\n'
         '`/pay <member> <amount>` — Chuyển coins ảo\n'
         '`/economy leaderboard` — Top total earned\n'
         '`/transactions [limit]` — Lịch sử giao dịch\n'
         '`/loan borrow|repay|status|offer|accept|cancel|history` — Vay/cho vay coins ảo\n\n'
+        '**🎰 Game**\n'
+        'Game chỉ hiện trong `!help` của kênh đã được admin gán bằng `/admin game_channels add`.\n\n'
         '**🏆 Xếp hạng**\n'
         '`/leaderboard` — Top hôm nay\n'
         '`/top_alltime` — Top tổng thời gian\n'
         '`/studying` — Ai đang học ngay lúc này\n\n'
         '**🎮 Gamification**\n'
         '`/quest` — Nhiệm vụ hôm nay\n'
+        '`/tasks ideas|preset|add|list|done` — Task học tập nhận thêm coins\n'
         '`/setgoal <mô tả> [hours] [minutes]` — Đặt mục tiêu\n\n'
         '**⏰ Tiện ích**\n'
-        '`/remind <hour>` — Nhắc học hàng ngày (0-23, -1 để tắt)\n'
         '`/ask <câu hỏi>` — Hỏi AI đa năng\n'
         '`/roles` — Xem vai trò theo money class\n\n'
-        '**🍅 Pomodoro**\n'
-        '`/pomodoro start` — Bắt đầu phiên cá nhân\n'
-        '`/pomodoro stop` — Dừng phiên\n'
-        '`/pomodoro status` — Xem tiến độ\n'
-        '`/pomodoro create <tên>` — Tạo phòng nhóm\n'
-        '`/pomodoro join <tên>` — Tham gia phòng nhóm\n'
-        '`/pomodoro leave` — Rời phòng nhóm\n'
-        '`/pomodoro list` — Xem danh sách phòng nhóm\n'
-        '`/pomodoro stats` — Lịch sử Pomodoro\n'
-        '`/pomodoro preset` — Lưu cấu hình yêu thích\n\n'
         '**📅 Báo cáo tuần**\n'
         '`/weekly preview` — Xem trước báo cáo tuần\n'
         '`/weekly on/off` — Bật/tắt báo cáo tuần\n'
@@ -6853,9 +6870,64 @@ async def slash_help(interaction: discord.Interaction):
         '`/weekly compare` — So sánh tuần này vs tuần trước\n\n'
         '**⚙️ Admin**\n'
         '`/admin setup` · `/admin setup_status` · `/admin setup_welcome` · `/admin welcome_status` · `/admin setup_roles` · `/admin db_status` · `/admin backup` · `/admin reset_all_data`\n'
+        '`/admin game_channels add|remove|list|clear` — Set kênh được phép chơi game theo từng game\n'
         '`/admin coins add|remove|set` · `/admin transactions`\n'
     )
-    await interaction.followup.send(msg, ephemeral=True)
+
+
+def _build_help_message(guild_id: int | None = None, channel_id: int | None = None) -> str:
+    if _is_configured_game_channel(guild_id, channel_id):
+        return _build_game_only_help_message(guild_id, channel_id)
+    return _build_full_help_message()
+
+
+def _split_discord_message(message: str, limit: int = 1900) -> list[str]:
+    if len(message) <= limit:
+        return [message]
+
+    chunks: list[str] = []
+    current = ''
+    for paragraph in message.split('\n\n'):
+        candidate = paragraph if not current else f'{current}\n\n{paragraph}'
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ''
+        while len(paragraph) > limit:
+            split_at = paragraph.rfind('\n', 0, limit)
+            if split_at <= 0:
+                split_at = limit
+            chunks.append(paragraph[:split_at].strip())
+            paragraph = paragraph[split_at:].strip()
+        current = paragraph
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _send_help_to_interaction(interaction: discord.Interaction) -> None:
+    chunks = _split_discord_message(_build_help_message(interaction.guild_id, interaction.channel_id))
+    await interaction.followup.send(chunks[0], ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+async def _send_help_to_channel(channel: discord.abc.Messageable, guild_id: int | None, channel_id: int | None) -> None:
+    for chunk in _split_discord_message(_build_help_message(guild_id, channel_id)):
+        await channel.send(chunk)
+
+
+@bot.tree.command(name='help', description='Danh sách tất cả lệnh của bot')
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await _send_help_to_interaction(interaction)
+
+
+@bot.command(name='help', aliases=['command', 'commands'])
+async def cmd_help(ctx: commands.Context):
+    await _send_help_to_channel(ctx.channel, ctx.guild.id if ctx.guild else None, ctx.channel.id if ctx.channel else None)
 
 # ── Admin commands ─────────────────────────────────────────────────────────
 
@@ -6867,6 +6939,11 @@ admin_group = app_commands.Group(
 admin_coins_group = app_commands.Group(
     name='coins',
     description='Quản trị coins',
+    default_permissions=discord.Permissions(administrator=True),
+)
+admin_game_channels_group = app_commands.Group(
+    name='game_channels',
+    description='Quản trị kênh game',
     default_permissions=discord.Permissions(administrator=True),
 )
 
@@ -7030,6 +7107,216 @@ def _format_config_role(guild: discord.Guild, role_id: int | None) -> str:
     return role.mention if role else f'`{role_id}` (không tìm thấy)'
 
 
+def _guild_game_channel_ids(guild_id: int) -> list[int]:
+    raw_ids = config_manager.get(int(guild_id), 'game_channel_ids', []) or []
+    ids: list[int] = []
+    for raw in raw_ids:
+        channel_id = _as_int(raw)
+        if channel_id and channel_id not in ids:
+            ids.append(channel_id)
+    return ids
+
+
+GAME_CHANNEL_ALL = 'all'
+GAME_CHANNEL_CHOICES = (GAME_CHANNEL_ALL, *GAME_ORDER)
+
+
+def _normal_game_key(game: str | None) -> str:
+    value = str(game or GAME_CHANNEL_ALL).lower().strip()
+    return value if value in GAME_CHANNEL_CHOICES else GAME_CHANNEL_ALL
+
+
+def _guild_game_channel_map(guild_id: int) -> dict[int, list[str]]:
+    raw_map = config_manager.get(int(guild_id), 'game_channel_map', {}) or {}
+    if not isinstance(raw_map, dict):
+        return {}
+    result: dict[int, list[str]] = {}
+    for raw_channel_id, raw_games in raw_map.items():
+        channel_id = _as_int(raw_channel_id)
+        if not channel_id:
+            continue
+        if isinstance(raw_games, str):
+            games = [_normal_game_key(raw_games)]
+        elif isinstance(raw_games, list):
+            games = [_normal_game_key(item) for item in raw_games]
+        else:
+            continue
+        deduped = []
+        for game in games:
+            if game not in deduped:
+                deduped.append(game)
+        if deduped:
+            result[channel_id] = deduped
+    return result
+
+
+def _set_guild_game_channel_map(guild_id: int, mapping: dict[int, list[str]], *, updated_by: int | None = None):
+    payload = {str(channel_id): games for channel_id, games in sorted(mapping.items()) if games}
+    config_manager.set(int(guild_id), 'game_channel_map', payload, updated_by=updated_by)
+
+
+def _channel_game_keys(guild_id: int, channel_id: int | None) -> set[str]:
+    if not channel_id:
+        return set()
+    mapping = _guild_game_channel_map(guild_id)
+    games = set(mapping.get(int(channel_id), []))
+    if not games and int(channel_id) in _guild_game_channel_ids(guild_id):
+        games.add(GAME_CHANNEL_ALL)
+    return games
+
+
+def _format_game_key(game: str) -> str:
+    if game == GAME_CHANNEL_ALL:
+        return 'all games'
+    return GAME_LABELS.get(game, game)
+
+
+def _format_game_assignments(guild: discord.Guild, mapping: dict[int, list[str]]) -> str:
+    if not mapping:
+        legacy_ids = _guild_game_channel_ids(guild.id)
+        return _format_config_channels(guild, legacy_ids)
+    lines = []
+    for channel_id, games in sorted(mapping.items()):
+        labels = ', '.join(_format_game_key(game) for game in games)
+        lines.append(f'{_format_config_channel(guild, channel_id)}: `{labels}`')
+    legacy_only = [channel_id for channel_id in _guild_game_channel_ids(guild.id) if channel_id not in mapping]
+    for channel_id in legacy_only:
+        lines.append(f'{_format_config_channel(guild, channel_id)}: `all games`')
+    return '\n'.join(lines) if lines else '`chưa set`'
+
+
+def _format_config_channels(guild: discord.Guild, channel_ids: list[int]) -> str:
+    if not channel_ids:
+        return '`chưa set`'
+    return ', '.join(_format_config_channel(guild, channel_id) for channel_id in channel_ids)
+
+
+GAME_CHANNEL_APP_CHOICES = [
+    app_commands.Choice(name='all', value='all'),
+    app_commands.Choice(name='blackjack', value='blackjack'),
+    app_commands.Choice(name='taixiu', value='taixiu'),
+    app_commands.Choice(name='slot', value='slot'),
+    app_commands.Choice(name='dice', value='dice'),
+    app_commands.Choice(name='hilo', value='hilo'),
+    app_commands.Choice(name='casino', value='casino'),
+]
+
+
+@admin_game_channels_group.command(name='add', description='[Admin] Thêm/gán kênh được phép chơi game')
+@app_commands.describe(channel='Text channel chuyên dùng cho casino/mini game', game='Game được phép trong channel này')
+@app_commands.choices(game=GAME_CHANNEL_APP_CHOICES)
+async def admin_game_channels_add(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    game: str = GAME_CHANNEL_ALL,
+):
+    if not await _require_admin(interaction, 'admin.game_channels.add'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    if channel.guild.id != guild.id:
+        await interaction.followup.send('Channel phải thuộc server hiện tại.', ephemeral=True)
+        return
+
+    game_key = _normal_game_key(game)
+    channel_ids = _guild_game_channel_ids(guild.id)
+    mapping = _guild_game_channel_map(guild.id)
+    if game_key == GAME_CHANNEL_ALL:
+        mapping[channel.id] = [GAME_CHANNEL_ALL]
+        if channel.id not in channel_ids:
+            channel_ids.append(channel.id)
+    else:
+        channel_ids = [channel_id for channel_id in channel_ids if channel_id != channel.id]
+        games = [item for item in mapping.get(channel.id, []) if item != GAME_CHANNEL_ALL]
+        if game_key not in games:
+            games.append(game_key)
+        mapping[channel.id] = games
+    config_manager.set(guild.id, 'game_channel_ids', channel_ids, updated_by=interaction.user.id)
+    _set_guild_game_channel_map(guild.id, mapping, updated_by=interaction.user.id)
+    await interaction.followup.send(
+        f'Đã gán **{_format_game_key(game_key)}** cho {channel.mention}.\n'
+        f'Danh sách hiện tại:\n{_format_game_assignments(guild, _guild_game_channel_map(guild.id))}',
+        ephemeral=True,
+    )
+
+
+@admin_game_channels_group.command(name='remove', description='[Admin] Xóa kênh hoặc game khỏi danh sách game')
+@app_commands.describe(channel='Text channel cần xóa khỏi danh sách game', game='Game cần xóa khỏi channel này')
+@app_commands.choices(game=GAME_CHANNEL_APP_CHOICES)
+async def admin_game_channels_remove(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    game: str = GAME_CHANNEL_ALL,
+):
+    if not await _require_admin(interaction, 'admin.game_channels.remove'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    if channel.guild.id != guild.id:
+        await interaction.followup.send('Channel phải thuộc server hiện tại.', ephemeral=True)
+        return
+
+    game_key = _normal_game_key(game)
+    channel_ids = _guild_game_channel_ids(guild.id)
+    mapping = _guild_game_channel_map(guild.id)
+    if game_key == GAME_CHANNEL_ALL:
+        channel_ids = [channel_id for channel_id in channel_ids if channel_id != channel.id]
+        mapping.pop(channel.id, None)
+    else:
+        if channel.id in channel_ids:
+            channel_ids = [channel_id for channel_id in channel_ids if channel_id != channel.id]
+            mapping[channel.id] = [item for item in GAME_CHANNEL_CHOICES if item not in {GAME_CHANNEL_ALL, game_key}]
+        else:
+            games = [item for item in mapping.get(channel.id, []) if item != game_key]
+            if games:
+                mapping[channel.id] = games
+            else:
+                mapping.pop(channel.id, None)
+    config_manager.set(guild.id, 'game_channel_ids', channel_ids, updated_by=interaction.user.id)
+    _set_guild_game_channel_map(guild.id, mapping, updated_by=interaction.user.id)
+    await interaction.followup.send(
+        f'Đã xóa **{_format_game_key(game_key)}** khỏi {channel.mention}.\n'
+        f'Danh sách hiện tại:\n{_format_game_assignments(guild, _guild_game_channel_map(guild.id))}',
+        ephemeral=True,
+    )
+
+
+@admin_game_channels_group.command(name='list', description='[Admin] Xem danh sách kênh game')
+async def admin_game_channels_list(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.game_channels.list'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    mapping = _guild_game_channel_map(guild.id)
+    await interaction.followup.send(
+        f'Kênh game hiện tại:\n{_format_game_assignments(guild, mapping)}',
+        ephemeral=True,
+    )
+
+
+@admin_game_channels_group.command(name='clear', description='[Admin] Xóa toàn bộ danh sách kênh game')
+async def admin_game_channels_clear(interaction: discord.Interaction):
+    if not await _require_admin(interaction, 'admin.game_channels.clear'):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('Lệnh này chỉ dùng được trong server.', ephemeral=True)
+        return
+    config_manager.set(guild.id, 'game_channel_ids', [], updated_by=interaction.user.id)
+    _set_guild_game_channel_map(guild.id, {}, updated_by=interaction.user.id)
+    await interaction.followup.send('Đã xóa toàn bộ kênh game đã set.', ephemeral=True)
+
+
 def is_bot_admin(member: discord.Member) -> bool:
     if not isinstance(member, discord.Member):
         return False
@@ -7111,6 +7398,7 @@ def _guild_setup_status_lines(guild: discord.Guild, config: dict) -> list[str]:
         f'Admin role: {_format_config_role(guild, config.get("admin_role_id"))}',
         f'Coins/minute: `{_as_int(config.get("coins_per_minute"), COINS_PER_MINUTE)}`',
         f'Focus rooms: `{len(focus_ids)}` configured',
+        f'Game channels: `{len(_guild_game_channel_ids(guild.id))}` configured',
     ]
     if bot_member:
         lines.append(f'Manage Roles: `{"yes" if bot_member.guild_permissions.manage_roles else "no"}`')
@@ -7407,6 +7695,7 @@ async def admin_reset_all_data(interaction: discord.Interaction, confirm: str):
 
 
 admin_group.add_command(admin_coins_group)
+admin_group.add_command(admin_game_channels_group)
 bot.tree.add_command(admin_group)
 
 
@@ -7728,10 +8017,86 @@ async def _sync_app_commands(*, reason: str = 'startup'):
     for guild in bot.guilds:
         await _sync_app_commands_for_guild(guild, reason=reason)
 
+
+GAME_TEXT_COMMANDS = {'blackjack', 'xidach', 'taixiu', 'slot', 'dice', 'hilo', 'daily', 'casino'}
+WALLET_TEXT_COMMANDS = {'wallet', 'balance', 'bal'}
+HELP_TEXT_COMMANDS = {'help', 'command', 'commands'}
+
+
+def _strip_text_command_prefix(message: discord.Message) -> tuple[str, bool]:
+    content = str(message.content or '').strip()
+    if not content:
+        return '', False
+    prefixes: list[str] = ['!']
+    if getattr(message, 'guild', None):
+        with contextlib.suppress(Exception):
+            configured = str(get_guild_config(message.guild.id).get('command_prefix') or '!')
+            if configured and configured not in prefixes:
+                prefixes.insert(0, configured)
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if content.startswith(prefix):
+            return content[len(prefix):].strip(), True
+    return content, False
+
+
+async def _dispatch_text_command_fallback(message: discord.Message) -> bool:
+    if message.author.bot or message.guild is None:
+        return False
+    content, had_prefix = _strip_text_command_prefix(message)
+    if not content:
+        return False
+    parts = content.split(maxsplit=1)
+    command = parts[0].lower()
+    known_text_commands = HELP_TEXT_COMMANDS | WALLET_TEXT_COMMANDS | GAME_TEXT_COMMANDS
+    if not had_prefix and command not in known_text_commands:
+        return False
+    if command in HELP_TEXT_COMMANDS:
+        await _send_help_to_channel(message.channel, message.guild.id, message.channel.id)
+        return True
+    if command in WALLET_TEXT_COMMANDS:
+        await _send_wallet_text_command(message, parts[1] if len(parts) > 1 else None)
+        return True
+    if command not in GAME_TEXT_COMMANDS:
+        return False
+    casino_cog = bot.get_cog('CasinoCog')
+    if not casino_cog:
+        await message.channel.send('Game chưa sẵn sàng. Thử lại sau vài giây hoặc báo admin kiểm tra plugin casino.')
+        return True
+    arg = parts[1] if len(parts) > 1 else None
+    if command in {'blackjack', 'xidach'}:
+        await casino_cog.start_blackjack_message(message, arg)
+    elif command == 'taixiu':
+        await casino_cog.start_taixiu_message(message)
+    elif command == 'slot':
+        await casino_cog.start_slot_message(message, arg)
+    elif command == 'dice':
+        await casino_cog.start_dice_duel_message(message, arg)
+    elif command == 'hilo':
+        await casino_cog.start_hilo_message(message, arg)
+    elif command == 'daily':
+        await casino_cog.start_daily_message(message)
+    elif command == 'casino':
+        subparts = str(arg or '').split(maxsplit=1)
+        subcommand = subparts[0].lower() if subparts else ''
+        subarg = subparts[1] if len(subparts) > 1 else None
+        if subcommand == 'bet':
+            await casino_cog.start_casino_bet_message(message, subarg)
+        elif subcommand in {'leaderboard', 'lb', 'top'}:
+            await casino_cog.start_casino_leaderboard_message(message)
+        else:
+            await message.channel.send('Dùng `!casino bet <amount>` hoặc `!casino leaderboard`.')
+    return True
+
+
 @bot.event
 async def on_message(message: discord.Message):
-    if not message.author.bot:
-        await bot.process_commands(message)
+    if message.author.bot:
+        return
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        await bot.invoke(ctx)
+        return
+    await _dispatch_text_command_fallback(message)
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
@@ -7784,7 +8149,7 @@ async def on_ready():
         threading.Thread(target=run_dashboard, daemon=True).start()
     log.info(f'🌐 Dashboard: http://localhost:{DASHBOARD_PORT}')
 
-    # Restore remind tasks and sync roles on recovery
+    # Sync roles on recovery.
     members_to_sync: list[tuple[discord.Member, int]] = []
     for guild in bot.guilds:
         with guild_data_context(guild.id):
@@ -7798,14 +8163,6 @@ async def on_ready():
             member = guild.get_member(mid)
             if not member:
                 continue
-
-            # Restore reminders
-            remind_h = info.get('remind_hour')
-            if remind_h is not None and mid not in remind_tasks:
-                await _cancel_reminder_task(mid)
-                t = asyncio.create_task(_remind_loop(member, remind_h))
-                remind_tasks[mid] = (remind_h, t)
-                log.info(f'[Remind] Khôi phục: {info["name"]} lúc {remind_h:02d}:00 trong {guild.name}')
 
             # Collect members for batched role sync
             level = info.get('class', info.get('level', 0))
@@ -7932,6 +8289,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     left_focus      = before.channel and is_focus_channel(before.channel.id)
     stayed_in_focus = joined_focus and left_focus
     moved_channels  = before.channel and after.channel and before.channel.id != after.channel.id
+    left_temporary  = before.channel and _is_temporary_room_id(before.channel.id)
 
     if joined_create_room:
         if left_focus:
@@ -7946,8 +8304,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             _schedule_temporary_room_cleanup(before.channel)
         was_active = is_media_active(before)
         now_active = is_media_active(after)
-        pomo_cog = bot.cogs.get('PomodoroCog')
-        in_pomodoro = pomo_cog is not None and member.id in getattr(pomo_cog, '_sessions', {})
         if not was_active and now_active:
             cancel_task(member.id)
             runtime_member_guild_ids[member.id] = member.guild.id
@@ -7960,22 +8316,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             log.info(f'{member.display_name} bật Cam/Stream → bắt đầu tính giờ từ bây giờ')
             await notify_cam_started(member, after.channel)
         elif was_active and not now_active:
-            if in_pomodoro:
-                current_info = load_data().get(str(member.id), {})
-                previous_level = current_info.get('class', current_info.get('level', 0))
-                await _do_checkpoint(member)
-                await _force_stop_pomodoro_if_active(member, reason='tắt Cam/Stream')
-                media_active_members.discard(member.id)
-                save_runtime_state()
-                await _sync_member_progress(member, previous_level)
-            else:
-                elapsed, result = await _do_checkpoint(member)
-                if result.get('level_up'):
-                    await _ensure_role_synced(member, result['new_level'])
-                await _handle_progress_notifications(member, result, after.channel)
-                await _check_quests_and_badges(member, after.channel)
-                media_active_members.discard(member.id)
-                save_runtime_state()
+            elapsed, result = await _do_checkpoint(member)
+            if result.get('level_up'):
+                await _ensure_role_synced(member, result['new_level'])
+            await _handle_progress_notifications(member, result, after.channel)
+            await _check_quests_and_badges(member, after.channel)
+            media_active_members.discard(member.id)
+            save_runtime_state()
             start_check(member, 'tắt Cam/Stream')
             await send_voice_notice(
                 channel=after.channel,
@@ -8020,6 +8367,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         await _handle_focus_leave(member, before.channel)
         if _is_temporary_room_id(before.channel.id):
             _schedule_temporary_room_cleanup(before.channel)
+
+    if (
+        left_temporary
+        and not left_focus
+        and (not after.channel or after.channel.id != before.channel.id)
+    ):
+        _schedule_temporary_room_cleanup(before.channel)
 
 # ─── FLASK DASHBOARD ─────────────────────────────────────────────────────────
 
