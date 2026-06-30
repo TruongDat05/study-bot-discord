@@ -16,17 +16,17 @@ TIME_RE = re.compile(r'^(\d{1,2}):(\d{2})$')
 
 
 class RemindersCog(commands.Cog, name='RemindersCog'):
-    reminders = app_commands.Group(name='reminders', description='Quản lý reminders học tập')
+    reminders = app_commands.Group(name='reminders', description='Reminders học tập đã tắt')
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     async def cog_load(self):
-        if not self.reminder_loop.is_running():
-            self.reminder_loop.start()
+        return
 
     async def cog_unload(self):
-        self.reminder_loop.cancel()
+        if self.reminder_loop.is_running():
+            self.reminder_loop.cancel()
 
     def _timezone(self, guild_id: int) -> ZoneInfo:
         raw = (
@@ -91,24 +91,8 @@ class RemindersCog(commands.Cog, name='RemindersCog'):
     async def remindme(self, interaction: discord.Interaction, when: str, message: str):
         if not await self._guard(interaction):
             return
-        try:
-            remind_at = self._parse_when(interaction.guild_id, when)
-        except (ValueError, OverflowError) as e:
-            await interaction.response.send_message(f'Không đọc được thời gian: {e}', ephemeral=True)
-            return
-        if remind_at <= datetime.now(remind_at.tzinfo) + timedelta(seconds=30):
-            await interaction.response.send_message('Reminder phải ở tương lai.', ephemeral=True)
-            return
-        reminder_id = self.bot.study_context.repository.create_reminder(
-            guild_id=interaction.guild_id,
-            user_id=interaction.user.id,
-            display_name=interaction.user.display_name,
-            remind_at=self._utc_iso(remind_at),
-            message=message,
-            channel_id=interaction.channel_id,
-        )
         await interaction.response.send_message(
-            f'Đã đặt reminder `#{reminder_id}` lúc `{self._format_when(interaction.guild_id, self._utc_iso(remind_at))}`.',
+            'Tính năng reminder học tập đã được tắt. Bot sẽ không gửi DM hoặc thông báo nhắc học.',
             ephemeral=True,
         )
 
@@ -141,56 +125,14 @@ class RemindersCog(commands.Cog, name='RemindersCog'):
 
     @discord_tasks.loop(minutes=1)
     async def reminder_loop(self):
-        due_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
-        reminders = self.bot.study_context.repository.claim_due_reminders(due_at, limit=25)
-        for reminder in reminders:
-            await self._send_reminder(reminder)
+        return
 
     @reminder_loop.before_loop
     async def before_reminder_loop(self):
         await self.bot.wait_until_ready()
 
     async def _send_reminder(self, reminder: dict):
-        guild_id = int(reminder['guild_id'])
-        guild = self.bot.get_guild(guild_id)
-        user = self.bot.get_user(int(reminder['user_id']))
-        if user is None:
-            try:
-                user = await self.bot.fetch_user(int(reminder['user_id']))
-            except discord.HTTPException:
-                user = None
-
-        embed = discord.Embed(
-            title='Nhắc học',
-            description=str(reminder.get('message') or 'Đến giờ học rồi.'),
-            color=0x5865F2,
-        )
-        embed.add_field(name='Thời gian', value=self._format_when(guild_id, reminder['remind_at']), inline=False)
-
-        mode = str(self.bot.study_context.config_manager.get(guild_id, 'reminder_delivery', 'dm') or 'dm').lower()
-        channel = None
-        channel_id = reminder.get('channel_id')
-        if guild and channel_id:
-            channel = guild.get_channel(int(channel_id))
-        if not channel and guild:
-            report_channel_id = self.bot.study_context.config_manager.get(guild_id, 'report_channel_id')
-            if report_channel_id:
-                channel = guild.get_channel(int(report_channel_id))
-
-        destinations = []
-        if mode == 'channel':
-            destinations = [channel, user]
-        else:
-            destinations = [user, channel]
-
-        for destination in destinations:
-            if destination is None:
-                continue
-            try:
-                await destination.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-                return
-            except (discord.Forbidden, discord.HTTPException):
-                continue
+        return
 
 
 async def setup(bot: commands.Bot):

@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import time
 import unicodedata
+from dataclasses import dataclass
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from services.ai_vision import (
+    GeminiVisionClient,
+    VisionConfigError,
+    VisionGeminiError,
+    VisionImageDownloadError,
+    VisionImageTooLargeError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +37,11 @@ SHORT_TERM_MEMORY_LIMIT = max(1, min(200, _env_int('SHORT_TERM_MEMORY_LIMIT', 30
 SHORT_TERM_MEMORY_MAX_CHARS = max(200, min(2000, _env_int('SHORT_TERM_MEMORY_MAX_CHARS', 1800) or 1800))
 SHORT_TERM_MEMORY_CONTEXT_CHARS = max(1000, min(20000, _env_int('SHORT_TERM_MEMORY_CONTEXT_CHARS', 6000) or 6000))
 SHORT_TERM_MEMORY_SUMMARY_MIN = max(3, _env_int('SHORT_TERM_MEMORY_SUMMARY_MIN', 3) or 3)
+AI_MENTION_COOLDOWN_SECONDS = max(0, _env_int('AI_MENTION_COOLDOWN_SECONDS', 12) or 0)
+AI_VISION_MAX_IMAGE_BYTES = max(1, _env_int('AI_VISION_MAX_IMAGE_MB', 10) or 10) * 1024 * 1024
+AI_VISION_DEFAULT_PROMPT = 'Hãy phân tích ảnh này và cho biết ảnh nói về gì.'
+AI_VISION_ALLOWED_MIME_TYPES = frozenset({'image/png', 'image/jpeg', 'image/webp'})
+AI_VISION_EMBED_DESCRIPTION_LIMIT = 3900
 
 SECRET_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -52,6 +68,17 @@ SUMMARY_REGEXES = tuple(
 )
 
 
+@dataclass(frozen=True)
+class VisionAttachment:
+    attachment: discord.Attachment
+    source_message: discord.Message
+    content_type: str
+
+
+class VisionUserError(Exception):
+    pass
+
+
 def _normalize_intent_text(text: str) -> str:
     normalized = unicodedata.normalize('NFD', str(text or '').lower())
     normalized = ''.join(ch for ch in normalized if unicodedata.category(ch) != 'Mn')
@@ -72,6 +99,8 @@ class AIChatPlugin(commands.Cog, name='AIChatPlugin'):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.ctx = bot.study_context
+        self.vision = GeminiVisionClient()
+        self._mention_cooldowns: dict[int, float] = {}
 
     def _extract_question_from_mention(self, message: discord.Message) -> str:
         if not self.bot.user:
@@ -285,6 +314,111 @@ class AIChatPlugin(commands.Cog, name='AIChatPlugin'):
             return await self.ctx.ask_ai(self._build_summary_prompt(history))
         return await self.ctx.ask_ai(self._build_context_prompt(question, history))
 
+    @staticmethod
+    def _attachment_content_type(attachment: discord.Attachment) -> str:
+        return str(getattr(attachment, 'content_type', '') or '').split(';', 1)[0].strip().lower()
+
+    def _select_supported_image(self, message: discord.Message) -> VisionAttachment | None:
+        for attachment in getattr(message, 'attachments', []) or []:
+            content_type = self._attachment_content_type(attachment)
+            if content_type in AI_VISION_ALLOWED_MIME_TYPES:
+                if int(getattr(attachment, 'size', 0) or 0) > AI_VISION_MAX_IMAGE_BYTES:
+                    raise VisionUserError(
+                        f'Ảnh quá nặng. Giới hạn hiện tại là `{AI_VISION_MAX_IMAGE_BYTES // (1024 * 1024)}MB`.'
+                    )
+                return VisionAttachment(attachment, message, content_type)
+        return None
+
+    async def _fetch_referenced_message(self, message: discord.Message) -> discord.Message | None:
+        reference = getattr(message, 'reference', None)
+        message_id = getattr(reference, 'message_id', None)
+        if not message_id:
+            return None
+
+        resolved = getattr(reference, 'resolved', None)
+        if isinstance(resolved, discord.Message):
+            return resolved
+
+        fetch_message = getattr(message.channel, 'fetch_message', None)
+        if not fetch_message:
+            return None
+        try:
+            return await fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            raise VisionUserError('Bot không fetch được tin nhắn bạn đang reply. Có thể thiếu quyền hoặc tin nhắn đã bị xóa.') from e
+
+    async def _resolve_vision_attachment(self, message: discord.Message) -> VisionAttachment | None:
+        direct_image = self._select_supported_image(message)
+        if direct_image:
+            return direct_image
+        if getattr(message, 'attachments', None):
+            raise VisionUserError('File đính kèm không hợp lệ. Bot chỉ nhận `image/png`, `image/jpeg`, hoặc `image/webp`.')
+
+        replied = await self._fetch_referenced_message(message)
+        if not replied:
+            return None
+
+        replied_image = self._select_supported_image(replied)
+        if replied_image:
+            return replied_image
+        if getattr(replied, 'attachments', None):
+            raise VisionUserError('Ảnh trong tin nhắn được reply không hợp lệ. Bot chỉ nhận `image/png`, `image/jpeg`, hoặc `image/webp`.')
+        return None
+
+    def _cooldown_remaining(self, user_id: int) -> float:
+        if AI_MENTION_COOLDOWN_SECONDS <= 0:
+            return 0.0
+        now = time.monotonic()
+        last_used = self._mention_cooldowns.get(int(user_id), 0.0)
+        remaining = AI_MENTION_COOLDOWN_SECONDS - (now - last_used)
+        return max(0.0, remaining)
+
+    def _mark_cooldown(self, user_id: int) -> None:
+        if AI_MENTION_COOLDOWN_SECONDS > 0:
+            self._mention_cooldowns[int(user_id)] = time.monotonic()
+
+    async def _enforce_mention_cooldown(self, message: discord.Message) -> bool:
+        remaining = self._cooldown_remaining(message.author.id)
+        if remaining <= 0:
+            return True
+        await message.reply(
+            f'Bạn chờ thêm `{math.ceil(remaining)}` giây rồi hỏi tiếp nhé.',
+            mention_author=False,
+        )
+        return False
+
+    @staticmethod
+    def _trim_embed_description(text: str) -> str:
+        text = str(text or '').strip()
+        if len(text) <= AI_VISION_EMBED_DESCRIPTION_LIMIT:
+            return text
+        return text[:AI_VISION_EMBED_DESCRIPTION_LIMIT - 20].rstrip() + '\n\n...'
+
+    async def _answer_with_vision(
+        self,
+        message: discord.Message,
+        question: str,
+        image: VisionAttachment,
+    ) -> tuple[discord.Message, str]:
+        answer = await self.vision.analyze_image_from_url(
+            question=question,
+            image_url=image.attachment.url,
+            content_type=image.content_type,
+            max_bytes=AI_VISION_MAX_IMAGE_BYTES,
+        )
+        embed = discord.Embed(
+            title='Phân tích ảnh',
+            description=self._trim_embed_description(answer),
+            color=0x5865F2,
+        )
+        embed.set_footer(text=f'Model: {self.vision.model}')
+        try:
+            embed.set_image(url=image.attachment.url)
+        except Exception:
+            pass
+        sent = await message.reply(embed=embed, mention_author=False)
+        return sent, answer
+
     async def _can_use_ai(self, target, *, send_denial: bool = True) -> bool:
         guild_id = getattr(target, 'guild_id', None) or getattr(getattr(target, 'guild', None), 'id', None)
         if not guild_id or await self.ctx.is_admin_actor(target):
@@ -293,15 +427,13 @@ class AIChatPlugin(commands.Cog, name='AIChatPlugin'):
         channel = getattr(target, 'channel', None)
         channel_id = getattr(channel, 'id', None)
         allowed = self.ctx.config_manager.get(int(guild_id), 'ai_enabled_channels') or []
-        if not allowed:
-            allowed = self.ctx.config_manager.get(int(guild_id), 'focus_channel_ids') or []
         allowed_ids = {int(ch_id) for ch_id in allowed if str(ch_id).isdigit()}
 
         # Empty config keeps backward compatibility. Once admins configure
-        # ai_enabled_channels, AI is restricted to those study channels.
+        # ai_enabled_channels, AI is restricted to those text channels.
         if allowed_ids and channel_id not in allowed_ids:
             if send_denial:
-                await self._deny(target, 'AI chỉ bật trong các kênh học đã cấu hình.')
+                await self._deny(target, 'AI chỉ bật trong các kênh AI đã cấu hình.')
             return False
         return True
 
@@ -391,16 +523,69 @@ class AIChatPlugin(commands.Cog, name='AIChatPlugin'):
             self._remember_message(message, source='normal')
             return
         question = self._extract_question_from_mention(message)
+        if not await self._can_use_ai(message):
+            return
+        if not await self._enforce_mention_cooldown(message):
+            return
+
+        try:
+            image = await self._resolve_vision_attachment(message)
+        except VisionUserError as e:
+            await message.reply(str(e), mention_author=False)
+            return
+
+        if image:
+            prompt = question or AI_VISION_DEFAULT_PROMPT
+            self._mark_cooldown(message.author.id)
+            self._remember_message(message, source='mention', content=f'{prompt} [image]')
+            async with message.channel.typing():
+                try:
+                    sent, answer = await self._answer_with_vision(message, prompt, image)
+                except VisionConfigError as e:
+                    detail = str(e)
+                    if 'google-genai' in detail.lower() and 'package' in detail.lower():
+                        await message.reply('Thiếu package `google-genai`. Hãy cài dependencies từ `requirements.txt` rồi thử lại.', mention_author=False)
+                    else:
+                        await message.reply('Thiếu `GEMINI_API_KEY` trong `.env` để dùng AI Vision.', mention_author=False)
+                    return
+                except VisionImageTooLargeError:
+                    await message.reply(
+                        f'Ảnh quá nặng. Giới hạn hiện tại là `{AI_VISION_MAX_IMAGE_BYTES // (1024 * 1024)}MB`.',
+                        mention_author=False,
+                    )
+                    return
+                except VisionImageDownloadError:
+                    await message.reply(
+                        'Không tải được ảnh từ Discord. Link ảnh có thể đã hết hạn hoặc bot thiếu quyền đọc ảnh.',
+                        mention_author=False,
+                    )
+                    return
+                except VisionGeminiError:
+                    log.warning('[AI Vision] Gemini Vision request failed.', exc_info=True)
+                    await message.reply('Gemini Vision đang lỗi hoặc chưa xử lý được ảnh này. Thử lại sau nhé.', mention_author=False)
+                    return
+                except Exception:
+                    log.exception('[AI Vision] Unexpected vision failure.')
+                    await message.reply('Có lỗi khi phân tích ảnh. Mình đã ghi log để kiểm tra.', mention_author=False)
+                    return
+            self._remember_ai_reply(
+                guild_id=guild_id,
+                channel_id=channel_id,
+                answer=answer,
+                message_id=getattr(sent, 'id', None),
+                created_at=self._created_at(sent),
+            )
+            return
+
         if not question:
             await message.reply(
-                'Bạn hãy tag bot kèm câu hỏi nhé. Ví dụ: `@bot giải thích Markov chain`',
+                'Bạn hãy tag bot kèm câu hỏi, hoặc gửi/reply một ảnh để bot phân tích.',
                 mention_author=False,
             )
             return
         history = self._load_history(guild_id, channel_id)
+        self._mark_cooldown(message.author.id)
         self._remember_message(message, source='mention', content=question)
-        if not await self._can_use_ai(message):
-            return
         async with message.channel.typing():
             answer = await self._answer_with_memory(question, guild_id, channel_id, history=history)
         sent = await message.reply(answer, mention_author=False)

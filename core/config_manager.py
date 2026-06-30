@@ -29,7 +29,7 @@ INT_KEYS = {
     'room_rent_coin_per_minute',
     'schedule_completion_bonus_coins',
 }
-LIST_INT_KEYS = {'ai_enabled_channels', 'focus_channel_ids'}
+LIST_INT_KEYS = {'ai_enabled_channels', 'focus_channel_ids', 'game_channel_ids'}
 LIST_STRING_KEYS = {'autoload_plugins'}
 STRING_KEYS = {'notify_channel_mode', 'command_prefix', 'timezone', 'reminder_delivery'}
 
@@ -41,15 +41,17 @@ IMPORTANT_CONFIG_DEFAULTS = {
     'admin_role_id': None,
     'coins_per_minute': 10,
     'ai_enabled_channels': [],
+    'game_channel_ids': [],
+    'game_channel_map': {},
     'notify_channel_mode': 'voice',
     'timezone': 'UTC',
     'reminder_delivery': 'dm',
     'room_rent_coin_per_minute': 2,
     'schedule_completion_bonus_coins': 10,
     'autoload_plugins': [
+        'casino',
         'ai_chat',
         'study_voice',
-        'pomodoro',
         'weekly_report',
         'moderation',
         'notify',
@@ -58,7 +60,6 @@ IMPORTANT_CONFIG_DEFAULTS = {
         'rooms',
         'tasklist',
         'schedule',
-        'reminders',
         'leaderboard',
     ],
     'command_prefix': '!',
@@ -212,8 +213,6 @@ class ConfigManager:
             return self._decode(row['value'], row['type'])
 
         legacy = self._legacy_config(guild_id)
-        if key == 'ai_enabled_channels' and legacy.get('focus_channel_ids'):
-            return list(legacy.get('focus_channel_ids') or [])
         if key in legacy:
             return legacy[key]
         if key in self.defaults:
@@ -268,15 +267,6 @@ class ConfigManager:
         legacy = self._legacy_config(guild_id)
         for key, value in legacy.items():
             result[key] = {'value': value, 'type': 'legacy', 'source': 'guild_configs', 'updated_by': None, 'updated_at': None}
-        if legacy.get('focus_channel_ids') and 'ai_enabled_channels' not in result:
-            result['ai_enabled_channels'] = {
-                'value': list(legacy.get('focus_channel_ids') or []),
-                'type': 'legacy',
-                'source': 'focus_channel_ids',
-                'updated_by': None,
-                'updated_at': None,
-            }
-
         with self.database.read_connection() as conn:
             rows = conn.execute(
                 'SELECT key, value, type, updated_by, updated_at FROM guild_config_values WHERE guild_id = ? ORDER BY key',

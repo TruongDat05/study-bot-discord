@@ -5,7 +5,7 @@ import logging
 import shutil
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -539,7 +539,7 @@ class BotRepository:
         return {
             'name': str(display_name or 'Unknown'),
             'total': 0,
-            'balance': 0,
+            'balance': 100000,
             'total_earned': 0,
             'debt': 0,
             'credit_score': 600,
@@ -788,18 +788,118 @@ class BotRepository:
             'transaction_id': tx_id,
         }
 
-    def create_task(self, guild_id: int, user_id: int, display_name: str, content: str) -> int:
+    def get_account_balance(self, *, guild_id: int, user_id: int, display_name: str | None = None) -> dict:
+        with self.db.transaction() as conn:
+            profile, account = self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            return {'balance': _as_int(account.get('balance', profile.get('balance', 0)))}
+
+    def change_balance(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str | None,
+        amount: int,
+        tx_type: str,
+        description: str,
+        count_as_earned: bool = False,
+        allow_negative: bool = False,
+        payload: dict | None = None,
+    ) -> dict:
+        with self.db.transaction() as conn:
+            return self._change_balance_conn(
+                conn,
+                guild_id=guild_id,
+                user_id=user_id,
+                display_name=display_name,
+                amount=amount,
+                tx_type=tx_type,
+                description=description,
+                count_as_earned=count_as_earned,
+                allow_negative=allow_negative,
+                payload=payload,
+            )
+
+    def claim_casino_daily(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        reward: int,
+        cooldown_seconds: int,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        with self.db.transaction() as conn:
+            profile, account = self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
+            last_raw = profile.get('casino_last_daily_at')
+            last_at = None
+            if last_raw:
+                try:
+                    last_at = datetime.fromisoformat(str(last_raw))
+                except ValueError:
+                    last_at = None
+                if last_at and last_at.tzinfo is None:
+                    last_at = last_at.replace(tzinfo=timezone.utc)
+                if last_at:
+                    last_at = last_at.astimezone(timezone.utc)
+            cooldown = timedelta(seconds=max(1, int(cooldown_seconds)))
+            if last_at and now - last_at < cooldown:
+                remaining = cooldown - (now - last_at)
+                total_seconds = max(1, int(remaining.total_seconds()))
+                hours, rem = divmod(total_seconds, 3600)
+                minutes, seconds = divmod(rem, 60)
+                return {
+                    'ok': False,
+                    'error': f'Bạn đã nhận daily rồi. Còn {hours:02d}:{minutes:02d}:{seconds:02d}.',
+                    'balance': _as_int(account.get('balance', profile.get('balance', 0))),
+                }
+
+            change = self._change_balance_conn(
+                conn,
+                guild_id=guild_id,
+                user_id=user_id,
+                display_name=display_name,
+                amount=int(reward),
+                tx_type='casino_daily',
+                description='Casino daily reward',
+                count_as_earned=True,
+                payload={'game': 'CASINO_DAILY'},
+            )
+            profile_row = conn.execute(
+                'SELECT profile_json FROM users WHERE guild_id = ? AND user_id = ?',
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+            profile = _json_loads(profile_row['profile_json'], profile) if profile_row else profile
+            profile['casino_last_daily_at'] = now.isoformat(timespec='seconds')
+            today = now.date().isoformat()
+            profile.setdefault('daily_earnings', {})
+            profile['daily_earnings'][today] = (
+                _as_int(profile['daily_earnings'].get(today), 0) + int(reward)
+            )
+            self._write_profile_conn(conn, guild_id, user_id, profile)
+            return {'ok': True, 'balance': int(change['balance']), 'reward': int(reward)}
+
+    def create_task(
+        self,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        content: str,
+        reward_coins: int = 0,
+    ) -> int:
         content = str(content or '').strip()
         if not content:
             raise ValueError('Task content is required.')
+        reward_coins = max(0, int(reward_coins or 0))
         with self.db.transaction() as conn:
             self._ensure_user_account_conn(conn, guild_id, user_id, display_name)
             cur = conn.execute(
                 """
-                INSERT INTO tasks (guild_id, user_id, content, completed, created_at)
-                VALUES (?, ?, ?, 0, ?)
+                INSERT INTO tasks (guild_id, user_id, content, completed, reward_coins, created_at)
+                VALUES (?, ?, ?, 0, ?, ?)
                 """,
-                (int(guild_id), int(user_id), content[:500], _now()),
+                (int(guild_id), int(user_id), content[:500], reward_coins, _now()),
             )
             return int(cur.lastrowid)
 
@@ -850,7 +950,10 @@ class BotRepository:
                 """,
                 (int(guild_id), int(user_id), f'{today}%'),
             ).fetchone()[0]
-            reward = int(reward_coins) if reward_count < int(daily_reward_cap) else 0
+            planned_reward = _as_int(task.get('reward_coins'), int(reward_coins))
+            if planned_reward <= 0:
+                planned_reward = int(reward_coins)
+            reward = planned_reward if reward_count < int(daily_reward_cap) else 0
             completed_at = _now()
             conn.execute(
                 """
@@ -947,9 +1050,11 @@ class BotRepository:
         channel_id: int,
         owner_id: int,
         owner_name: str,
+        mode: str = 'study',
         expires_at: str | None = None,
         rent_paid_coins: int = 0,
     ) -> dict:
+        mode = 'entertainment' if str(mode).lower() == 'entertainment' else 'study'
         with self.db.transaction() as conn:
             if rent_paid_coins:
                 self._change_balance_conn(
@@ -967,13 +1072,13 @@ class BotRepository:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO private_rooms (
-                    guild_id, channel_id, owner_id, created_at, expires_at,
+                    guild_id, channel_id, owner_id, created_at, mode, expires_at,
                     locked, rent_paid_coins, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL)
                 """,
                 (
                     int(guild_id), int(channel_id), int(owner_id), _now(),
-                    expires_at, int(rent_paid_coins),
+                    mode, expires_at, int(rent_paid_coins),
                 ),
             )
             return self.get_private_room_in_conn(conn, guild_id, channel_id)

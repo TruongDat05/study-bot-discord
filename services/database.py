@@ -132,6 +132,7 @@ class DatabaseService:
                 ('locked', 'locked INTEGER NOT NULL DEFAULT 0'),
                 ('rent_paid_coins', 'rent_paid_coins INTEGER NOT NULL DEFAULT 0'),
                 ('deleted_at', 'deleted_at TEXT'),
+                ('mode', "mode TEXT NOT NULL DEFAULT 'study'"),
             ],
             'scheduled_sessions': [
                 ('status', "status TEXT NOT NULL DEFAULT 'booked'"),
@@ -155,6 +156,57 @@ class DatabaseService:
                 if column not in existing:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN {definition}')
                     existing.add(column)
+        self._rebuild_casino_history_if_legacy(conn)
+
+    def _rebuild_casino_history_if_legacy(self, conn) -> None:
+        """Relax old casino history CHECK constraints so every mini-game can log."""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'casino_game_history'"
+        ).fetchone()
+        sql = str(row['sql'] if row else '')
+        if not sql:
+            return
+        legacy_game_check = "game_type IN ('BLACKJACK', 'TAIXIU')" in sql
+        legacy_result_check = "result IN ('WIN', 'LOSE', 'DRAW')" in sql
+        if not legacy_game_check and not legacy_result_check:
+            return
+
+        conn.execute('DROP TABLE IF EXISTS casino_game_history_new')
+        conn.execute(
+            """
+            CREATE TABLE casino_game_history_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                game_type TEXT NOT NULL,
+                bet_amount INTEGER NOT NULL,
+                result TEXT NOT NULL CHECK (result IN ('WIN', 'LOSE', 'DRAW', 'PARTIAL', 'TIMEOUT', 'CANCELLED')),
+                profit INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO casino_game_history_new (
+                id, guild_id, user_id, game_type, bet_amount, result, profit,
+                metadata_json, created_at
+            )
+            SELECT
+                id, guild_id, user_id, game_type, bet_amount, result, profit,
+                metadata_json, created_at
+            FROM casino_game_history
+            """
+        )
+        conn.execute('DROP TABLE casino_game_history')
+        conn.execute('ALTER TABLE casino_game_history_new RENAME TO casino_game_history')
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_casino_game_history_user
+            ON casino_game_history (guild_id, user_id, created_at)
+            """
+        )
 
     def status(self) -> dict:
         if self.backend != 'sqlite':
@@ -171,7 +223,8 @@ class DatabaseService:
                 'runtime_sessions', 'runtime_snapshots',
                 'guild_config_values', 'acl_rules', 'tasks', 'private_rooms',
                 'scheduled_sessions', 'reminders', 'achievements',
-                'short_term_chat_memory',
+                'casino_game_history', 'casino_taixiu_rounds',
+                'casino_taixiu_bets', 'short_term_chat_memory',
             ):
                 counts[table] = conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
         return {
@@ -357,6 +410,7 @@ CREATE TABLE IF NOT EXISTS private_rooms (
     channel_id INTEGER NOT NULL,
     owner_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'study',
     expires_at TEXT,
     locked INTEGER NOT NULL DEFAULT 0,
     rent_paid_coins INTEGER NOT NULL DEFAULT 0,
@@ -471,6 +525,52 @@ ON acl_rules (guild_id, action, enabled, priority);
 
 CREATE INDEX IF NOT EXISTS idx_acl_rules_subjects
 ON acl_rules (guild_id, user_id, role_id, channel_id, category_id);
+
+CREATE TABLE IF NOT EXISTS casino_game_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    game_type TEXT NOT NULL,
+    bet_amount INTEGER NOT NULL,
+    result TEXT NOT NULL CHECK (result IN ('WIN', 'LOSE', 'DRAW', 'PARTIAL', 'TIMEOUT', 'CANCELLED')),
+    profit INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_casino_game_history_user
+ON casino_game_history (guild_id, user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS casino_taixiu_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    round_number INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('BETTING', 'LOCKED', 'FINISHED')),
+    dice1 INTEGER,
+    dice2 INTEGER,
+    dice3 INTEGER,
+    total INTEGER,
+    result TEXT CHECK (result IN ('TAI', 'XIU')),
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_casino_taixiu_round_number
+ON casino_taixiu_rounds (guild_id, round_number);
+
+CREATE TABLE IF NOT EXISTS casino_taixiu_bets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    round_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    choice TEXT NOT NULL CHECK (choice IN ('TAI', 'XIU')),
+    amount INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (round_id) REFERENCES casino_taixiu_rounds(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_casino_taixiu_bet_once
+ON casino_taixiu_bets (guild_id, round_id, user_id);
 
 CREATE TABLE IF NOT EXISTS short_term_chat_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -18,7 +18,9 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py pomodoro.py weekly_report.py ./
+COPY bot.py weekly_report.py ./
+COPY assets ./assets
+COPY core ./core
 COPY services ./services
 COPY plugins ./plugins
 

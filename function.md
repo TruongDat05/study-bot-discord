@@ -19,7 +19,6 @@ Tài liệu ngắn gọn về các chức năng chính và cách dùng bot học
 - `/leaderboard`: bảng xếp hạng học hôm nay.
 - `/top_alltime`: bảng xếp hạng tổng thời gian học.
 - `/setgoal <goal> [hours] [minutes]`: đặt mục tiêu học tập.
-- `/remind <hour>`: đặt giờ nhắc học hằng ngày qua DM, nhập `-1` để tắt.
 
 ## Quest, huy hiệu, class
 
@@ -28,25 +27,28 @@ Tài liệu ngắn gọn về các chức năng chính và cách dùng bot học
 - `/roles`: xem danh sách vai trò theo money class.
 - Bot tự cộng coins, cập nhật class và đồng bộ role khi bạn học đủ điều kiện.
 
-## Pomodoro
-
-- `/pomodoro start [work] [break] [rounds]`: bắt đầu Pomodoro cá nhân.
-- `/pomodoro stop`: dừng phiên đang chạy.
-- `/pomodoro status`: xem tiến độ phiên hiện tại.
-- `/pomodoro preset [work] [break] [rounds]`: lưu cấu hình yêu thích.
-- `/pomodoro stats`: xem lịch sử Pomodoro.
-- `/pomodoro create <name> [work] [break] [rounds]`: tạo phòng Pomodoro nhóm.
-- `/pomodoro join <name>`: tham gia phòng Pomodoro nhóm.
-- `/pomodoro leave`: rời phòng nhóm.
-- `/pomodoro list`: xem danh sách phòng nhóm.
-
 ## Economy coins
 
-- `/balance [member]`: xem balance, total earned, class, debt, credit score.
+- `!wallet [@member]` hoặc `!balance [@member]`: xem balance, total earned, class, debt, credit score. `/balance` vẫn dùng được nếu cần slash.
 - `/pay <member> <amount>`: chuyển coins ảo cho người khác.
+- Tiền thưởng học tập, task, daily và tiền nhận từ trò chơi dùng chung một ví coins.
 - `/transactions [limit]`: xem lịch sử giao dịch.
 - `/economy leaderboard`: top người có total earned cao nhất.
 - `/economy adjust <member> <amount> <reason>`: admin điều chỉnh balance.
+- `/tasks ideas`: xem các task học tập gợi ý để kiếm thêm coins.
+- `/tasks preset <task>`: thêm nhanh một task gợi ý có reward.
+- `/tasks add <content>` rồi `/tasks done <task_id>`: tự tạo task và hoàn thành để nhận thêm coins.
+
+## Casino coins
+
+- `/blackjack <bet>`, `/xidach <bet>`, `!blackjack <bet>`, hoặc `blackjack <bet>`: chơi Blackjack/Xì Dách bằng ví coins chung.
+- `/taixiu`, `!taixiu`, hoặc `taixiu`: mở một bàn Tài Xỉu. Chơi xong giữ nguyên kết quả, muốn chơi tiếp thì gọi lệnh mới để tạo sàn mới.
+- `!slot <bet>` hoặc `slot <bet>`: Slot Machine 3 ô emoji, bấm Spin/Spin Again.
+- `!dice <bet>` hoặc `dice <bet>`: Dice Duel đấu bot, mỗi bên tung 2 xúc xắc.
+- `!hilo <bet>` hoặc `hilo <bet>`: Hi-Lo 1-100, chọn Higher/Lower rồi Cash Out hoặc Continue.
+- `!daily` hoặc `daily`: nhận ngẫu nhiên 1,000-5,000 daily coins mỗi 24 giờ.
+- `!casino bet <bet>` hoặc `casino bet <bet>`: đặt mức cược mặc định cho Tài Xỉu.
+- `!casino leaderboard` hoặc `casino leaderboard`: top balance coins.
 
 ## Loan/vay coins
 
@@ -63,14 +65,14 @@ Tài liệu ngắn gọn về các chức năng chính và cách dùng bot học
 - `/room_panel`: tạo nút `Bảng điều khiển` cho phòng học.
 - Bấm `Bảng điều khiển` để mở dashboard riêng tư.
 - Nhóm Room controls: khóa phòng, mở phòng, đổi tên, xóa phòng.
-- Nhóm Study controls: Pomodoro start, stop, status.
 - Nhóm Economy controls: balance, borrow, repay, lend, loan status.
 
 ## Phòng học tạm
 
-- Khi vào kênh tạo phòng, bot tạo phòng học riêng cho bạn.
+- Khi vào kênh tạo phòng, bot cho chọn mode: Phòng học hoặc Phòng giải trí.
+- Phòng học cần bật Cam hoặc Stream để được tính giờ học và nhận coins.
+- Phòng giải trí không bắt buộc bật Cam/Stream, dùng để chơi game hoặc trò chuyện.
 - Phòng tạm tự xóa khi không còn thành viên thật ở lại.
-- Vẫn cần bật Cam hoặc Stream để được tính giờ và tránh bị kick.
 
 ## Thông báo riêng
 

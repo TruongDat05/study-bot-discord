@@ -11,8 +11,79 @@ from discord.ext import commands, tasks as discord_tasks
 DURATION_RE = re.compile(r'^(\d{1,4})\s*([mh])$', re.IGNORECASE)
 
 
+def normalize_room_mode(mode: str | None) -> str:
+    return 'entertainment' if str(mode or '').lower() == 'entertainment' else 'study'
+
+
+def room_mode_label(mode: str | None) -> str:
+    return 'Phòng giải trí' if normalize_room_mode(mode) == 'entertainment' else 'Phòng học'
+
+
+class RoomModeView(discord.ui.View):
+    def __init__(
+        self,
+        cog: RoomsCog,
+        *,
+        owner_id: int,
+        name: str | None,
+        user_limit: int,
+        expires_at: str | None = None,
+        rent_paid_coins: int = 0,
+    ):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.owner_id = int(owner_id)
+        self.name = name
+        self.user_limit = int(user_limit or 0)
+        self.expires_at = expires_at
+        self.rent_paid_coins = int(rent_paid_coins or 0)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message('Chỉ người tạo phòng mới chọn mode phòng.', ephemeral=True)
+        return False
+
+    async def _create(self, interaction: discord.Interaction, mode: str):
+        mode = normalize_room_mode(mode)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f'Đã chọn **{room_mode_label(mode)}**. Đang tạo phòng...',
+            view=self,
+        )
+        try:
+            channel = await self.cog._create_channel(
+                interaction,
+                name=self.name,
+                user_limit=self.user_limit,
+                room_mode=mode,
+                expires_at=self.expires_at,
+                rent_paid_coins=self.rent_paid_coins,
+            )
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send('Bot thiếu quyền Manage Channels/Move Members.', ephemeral=True)
+            return
+        await interaction.followup.send(
+            f'Đã tạo {room_mode_label(mode).lower()}: {channel.mention}',
+            ephemeral=True,
+        )
+        self.stop()
+
+    @discord.ui.button(label='Phòng học', style=discord.ButtonStyle.success)
+    async def study_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create(interaction, 'study')
+
+    @discord.ui.button(label='Phòng giải trí', style=discord.ButtonStyle.primary)
+    async def entertainment_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create(interaction, 'entertainment')
+
+
 class RoomsCog(commands.Cog, name='RoomsCog'):
-    room = app_commands.Group(name='room', description='Phòng học riêng')
+    room = app_commands.Group(name='room', description='Phòng riêng')
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -72,6 +143,7 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
         *,
         name: str | None,
         user_limit: int | None,
+        room_mode: str = 'study',
         expires_at: str | None = None,
         rent_paid_coins: int = 0,
     ) -> discord.VoiceChannel:
@@ -88,12 +160,13 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
                 move_members=True,
             ),
         }
+        room_mode = normalize_room_mode(room_mode)
         channel = await guild.create_voice_channel(
             name=(name or f'Phòng của {owner.display_name}')[:100],
             category=category,
             overwrites=overwrites,
             user_limit=int(user_limit or 0),
-            reason='Private study room',
+            reason=f'Private {room_mode} room',
         )
         try:
             self.bot.study_context.repository.create_private_room(
@@ -101,6 +174,7 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
                 channel_id=channel.id,
                 owner_id=owner.id,
                 owner_name=owner.display_name,
+                mode=room_mode,
                 expires_at=expires_at,
                 rent_paid_coins=rent_paid_coins,
             )
@@ -111,12 +185,41 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
         member = owner if isinstance(owner, discord.Member) else None
         if member and member.voice and member.voice.channel:
             try:
-                await member.move_to(channel, reason='Move owner to private study room')
+                await member.move_to(channel, reason=f'Move owner to private {room_mode} room')
             except discord.HTTPException:
                 pass
+        await self._send_room_welcome(channel, owner, room_mode)
         return channel
 
-    @room.command(name='create', description='Tạo phòng học riêng')
+    async def _send_room_welcome(self, channel: discord.VoiceChannel, owner: discord.abc.User, mode: str):
+        if normalize_room_mode(mode) == 'entertainment':
+            description = (
+                f'Chủ phòng: **{owner.display_name}**\n\n'
+                'Mode: **Phòng giải trí**\n'
+                '• Không bắt buộc bật Cam hoặc Stream.\n'
+                '• Có thể dùng để chơi game hoặc trò chuyện.\n'
+                '• Phòng này không tính thời gian học và không cộng coins học.'
+            )
+        else:
+            description = (
+                f'Chủ phòng: **{owner.display_name}**\n\n'
+                'Mode: **Phòng học**\n'
+                '• Thành viên cần bật Cam hoặc Stream để được tính thời gian học.\n'
+                '• Coins học sẽ cộng vào cùng ví với coins game.'
+            )
+        try:
+            await channel.send(
+                embed=discord.Embed(
+                    title=f'Đã tạo {room_mode_label(mode)}',
+                    description=description,
+                    color=0x57F287 if normalize_room_mode(mode) == 'study' else 0x5865F2,
+                ),
+                silent=True,
+            )
+        except discord.HTTPException:
+            pass
+
+    @room.command(name='create', description='Tạo phòng riêng')
     @app_commands.describe(name='Tên phòng tùy chọn', user_limit='Giới hạn người vào phòng')
     async def create(
         self,
@@ -126,13 +229,24 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
     ):
         if not await self._guard(interaction, 'room.create'):
             return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = await self._create_channel(interaction, name=name, user_limit=int(user_limit or 0))
-        except discord.Forbidden:
-            await interaction.followup.send('Bot thiếu quyền Manage Channels/Move Members.', ephemeral=True)
-            return
-        await interaction.followup.send(f'Đã tạo phòng: {channel.mention}', ephemeral=True)
+        embed = discord.Embed(
+            title='Chọn mode phòng',
+            description=(
+                '**Phòng học**: cần bật Cam hoặc Stream để được tính thời gian học và nhận coins.\n'
+                '**Phòng giải trí**: không bắt buộc Cam/Stream, dùng để chơi game hoặc trò chuyện.'
+            ),
+            color=0x5865F2,
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=RoomModeView(
+                self,
+                owner_id=interaction.user.id,
+                name=name,
+                user_limit=int(user_limit or 0),
+            ),
+            ephemeral=True,
+        )
 
     @room.command(name='rent', description='Thuê phòng học riêng bằng coins')
     @app_commands.describe(duration='Ví dụ: 30m, 2h', name='Tên phòng tùy chọn')
@@ -153,6 +267,7 @@ class RoomsCog(commands.Cog, name='RoomsCog'):
                 interaction,
                 name=name,
                 user_limit=0,
+                room_mode='study',
                 expires_at=expires_at,
                 rent_paid_coins=cost,
             )

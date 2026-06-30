@@ -44,9 +44,9 @@ class PluginManager:
         self.plugin_dir = Path(plugin_dir)
         self.config_manager = config_manager
         self.default_plugins = default_plugins or [
+            'casino',
             'ai_chat',
             'study_voice',
-            'pomodoro',
             'weekly_report',
             'moderation',
             'notify',
@@ -55,7 +55,6 @@ class PluginManager:
             'rooms',
             'tasklist',
             'schedule',
-            'reminders',
             'leaderboard',
         ]
         self.failed: dict[str, PluginFailure] = {}
